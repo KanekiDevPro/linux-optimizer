@@ -1,3 +1,4 @@
+
 #!/bin/bash
 # https://github.com/hawshemi/Linux-Optimizer
 
@@ -404,7 +405,6 @@ vm.overcommit_memory = 1
 vm.overcommit_ratio = 100
 
 kernel.panic = 1
-
 
 
 ################################################################
