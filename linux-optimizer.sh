@@ -126,7 +126,6 @@ fix_dns(){
 
 
 
-# Fix DNS Permanently
 fix_dns(){
     echo
     yellow_msg "Fixing DNS Permanently with systemd-resolved..."
@@ -145,16 +144,15 @@ fix_dns(){
     yellow_msg "Backup of resolv.conf created at $BACKUP_PATH"
     sleep 0.5
 
-    # پیدا کردن interface های فعال به جز loopback
-    interfaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo)
+    # پیدا کردن interface های UP به جز loopback
+    interfaces=$(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo)
 
-    # ست کردن DNS روی همه interface ها
+    # ست کردن DNS روی همه interface های واقعی
     for iface in $interfaces; do
-        sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8
+        sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8 2606:4700:4700::1111 2001:4860:4860::8888
         sudo resolvectl domain "$iface" "~."
     done
 
-    # چک کردن وضعیت DNS
     green_msg "DNS has been updated permanently. Current DNS status:"
     resolvectl status
     echo
