@@ -115,7 +115,7 @@ fix_etc_hosts(){
 }
 
 
-# Fix DNS Temporarily
+# Fix DNS Permanently
 fix_dns(){
     echo
     yellow_msg "Fixing DNS Permanently with systemd-resolved..."
@@ -134,9 +134,14 @@ fix_dns(){
     yellow_msg "Backup of resolv.conf created at $BACKUP_PATH"
     sleep 0.5
 
-    # تنظیم DNS جدید برای systemd-resolved
-    sudo resolvectl dns $(hostname) 1.1.1.2 1.0.0.2
-    sudo resolvectl domain $(hostname) "~."  # تنظیم domain به default
+    # پیدا کردن interface های فعال به جز loopback
+    interfaces=$(ip -o link show | awk -F': ' '{print $2}' | grep -v lo)
+
+    # ست کردن DNS روی همه interface ها
+    for iface in $interfaces; do
+        sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8
+        sudo resolvectl domain "$iface" "~."
+    done
 
     # چک کردن وضعیت DNS
     green_msg "DNS has been updated permanently. Current DNS status:"
