@@ -117,24 +117,37 @@ fix_etc_hosts(){
 
 # Fix DNS Temporarily
 fix_dns(){
-    echo 
-    yellow_msg "Fixing DNS Temporarily."
+    echo
+    yellow_msg "Fixing DNS Permanently with systemd-resolved..."
     sleep 0.5
 
-    cp $DNS_PATH /etc/resolv.conf.bak
-    yellow_msg "Default resolv.conf file saved. Directory: /etc/resolv.conf.bak"
+    # بررسی اینکه systemd-resolved فعال باشه
+    if ! systemctl is-active --quiet systemd-resolved; then
+        red_msg "systemd-resolved is not active! Starting it..."
+        sudo systemctl enable --now systemd-resolved
+        sleep 1
+    fi
+
+    # Backup کردن فایل فعلی
+    BACKUP_PATH="/etc/resolv.conf.bak.$(date +%Y%m%d%H%M%S)"
+    sudo cp /etc/resolv.conf "$BACKUP_PATH"
+    yellow_msg "Backup of resolv.conf created at $BACKUP_PATH"
     sleep 0.5
 
-    sed -i '/nameserver/d' $DNS_PATH
+    # پیدا کردن interface های UP به جز loopback
+    interfaces=$(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo)
 
-    echo "nameserver 1.1.1.2" >> $DNS_PATH
-    echo "nameserver 1.0.0.2" >> $DNS_PATH
-    echo "nameserver 127.0.0.53" >> $DNS_PATH
+    # ست کردن DNS روی همه interface های واقعی
+    for iface in $interfaces; do
+        sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8 2606:4700:4700::1111 2001:4860:4860::8888
+        sudo resolvectl domain "$iface" "~."
+    done
 
-    green_msg "DNS Fixed Temporarily."
-    echo 
-    sleep 0.5
+    green_msg "DNS has been updated permanently. Current DNS status:"
+    resolvectl status
+    echo
 }
+
 
 
 # Set the server TimeZone to the VPS IP address location.
