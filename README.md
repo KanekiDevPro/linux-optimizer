@@ -1,3 +1,5 @@
+این نسخه دیباگ شده و اضافه کردن چند تا از تنظیمات مهم و ضرور برای سرور هستش#  
+
 # Linux Optimizer
 
 ## This Bash script automates the optimization of your Linux server.
