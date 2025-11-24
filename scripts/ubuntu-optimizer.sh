@@ -606,9 +606,7 @@ ufw_optimizations() {
     ## Open default ports.
     sudo ufw allow $SSH_PORT
     sudo ufw allow 80/tcp
-    sudo ufw allow 80/udp
     sudo ufw allow 443/tcp
-    sudo ufw allow 443/udp
     sleep 0.5
 
     ## Change the UFW config to use System config.
