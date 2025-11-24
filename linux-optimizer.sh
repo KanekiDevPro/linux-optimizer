@@ -118,58 +118,48 @@ fix_etc_hosts(){
 # Fix DNS Temporarily
 fix_dns(){
     echo
-    yellow_msg "Fixing DNS Permanently via systemd-resolved..."
+    yellow_msg "Configuring Systemd-Resolved (The Standard Way)..."
     sleep 0.5
 
-    # 1. نصب و فعال‌سازی سرویس در صورت نیاز
-    if ! systemctl is-active --quiet systemd-resolved; then
-        yellow_msg "systemd-resolved is not active. Starting..."
-        sudo systemctl enable --now systemd-resolved
-        sleep 1
-    fi
-
-    # 2. تنظیم DNS در فایل کانفیگ اصلی (این بخش ماندگاری را تضمین می‌کند)
-    # ما DNS و FallbackDNS را در فایل /etc/systemd/resolved.conf ست می‌کنیم
-    RESOLVED_CONF="/etc/systemd/resolved.conf"
+    # 1. اصلاح فایل کانفیگ اصلی (بدون نیاز به nano)
+    # این دستورات تنظیمات قبلی را پاک کرده و DNS جدید را جایگزین می‌کنند
+    local CONFIG_FILE="/etc/systemd/resolved.conf"
     
-    if [ -f "$RESOLVED_CONF" ]; then
-        sudo cp "$RESOLVED_CONF" "$RESOLVED_CONF.bak"
-        
-        # استفاده از sed برای جایگزینی یا اضافه کردن خط DNS
-        # حذف کامنت DNS= اگر وجود داشته باشد و جایگزینی با مقادیر جدید
-        sudo sed -i '/^#DNS=/d' "$RESOLVED_CONF"
-        sudo sed -i '/^DNS=/d' "$RESOLVED_CONF"
-        echo "DNS=1.1.1.1 8.8.8.8 2606:4700:4700::1111 2001:4860:4860::8888" | sudo tee -a "$RESOLVED_CONF" > /dev/null
-        
-        # تنظیم FallbackDNS برای اطمینان
-        sudo sed -i '/^#FallbackDNS=/d' "$RESOLVED_CONF"
-        sudo sed -i '/^FallbackDNS=/d' "$RESOLVED_CONF"
-        echo "FallbackDNS=1.0.0.1 8.8.4.4" | sudo tee -a "$RESOLVED_CONF" > /dev/null
-        
-        green_msg "Global DNS configuration updated in $RESOLVED_CONF"
-    fi
+    # بک‌آپ‌گیری محض احتیاط
+    [ ! -f "$CONFIG_FILE.bak" ] && sudo cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
 
-    # 3. اصلاح سیم‌لینک (Symlink) فایل resolv.conf
-    # systemd-resolved نیاز دارد که این فایل یک لینک باشد، نه یک فایل متنی معمولی
-    if [ -f "/etc/resolv.conf" ] && [ ! -L "/etc/resolv.conf" ]; then
-        yellow_msg "Fixing /etc/resolv.conf symlink..."
-        sudo rm /etc/resolv.conf
-        sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    # استفاده از sed برای تغییر مقادیر DNS و FallbackDNS
+    # اگر خط وجود داشت تغییرش بده، اگر کامنت بود آن‌کامنت کن
+    sudo sed -i 's/^#\?DNS=.*/DNS=8.8.8.8 8.8.4.4 1.1.1.1/' "$CONFIG_FILE"
+    sudo sed -i 's/^#\?FallbackDNS=.*/FallbackDNS=1.0.0.1 9.9.9.9/' "$CONFIG_FILE"
+    
+    # اگر خط‌ها اصلا وجود نداشتند، به ته فایل اضافه کن (برای اطمینان)
+    if ! grep -q "^DNS=" "$CONFIG_FILE"; then
+        echo "DNS=8.8.8.8 8.8.4.4 1.1.1.1" | sudo tee -a "$CONFIG_FILE" > /dev/null
     fi
     
-    # 4. اعمال تغییرات روی اینترفیس‌های فعال (برای اعمال آنی بدون ریبوت)
-    interfaces=$(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo)
-    for iface in $interfaces; do
-       sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8
-       sudo resolvectl domain "$iface" "~."
-    done
+    yellow_msg "Configuration updated in $CONFIG_FILE"
+    sleep 0.5
 
-    # 5. ریستارت سرویس برای اعمال تنظیمات فایل کانفیگ
+    # 2. اصلاح سیم‌لینک (مهم‌ترین بخش برای جلوگیری از بازنویسی توسط سیستم)
+    # این فایل باید به stub-resolv.conf اشاره کند تا DNS لوکال سیستم فعال شود
+    
+    if [ -L "/etc/resolv.conf" ] || [ -f "/etc/resolv.conf" ]; then
+        sudo rm -f /etc/resolv.conf
+    fi
+    
+    sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+    green_msg "Symlink fixed: /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf"
+
+    # 3. اعمال تغییرات و ریستارت سرویس
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now systemd-resolved
     sudo systemctl restart systemd-resolved
-
-    green_msg "DNS Fixed and Persistent. Status:"
-    resolvectl status --no-pager | grep "DNS Servers" -A 2
+    
     echo
+    green_msg "DNS Fixed Permanently via Systemd Config."
+    echo "Current Status:"
+    resolvectl status --no-pager | grep "DNS Servers" -A 2
 }
 
 
