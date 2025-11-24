@@ -118,7 +118,7 @@ fix_etc_hosts(){
 }
 
 
-# Fix DNS Temporarily
+# Fix DNS Permanently
 fix_dns(){
     echo
     yellow_msg "Configuring Systemd-Resolved (The Standard Way)..."
