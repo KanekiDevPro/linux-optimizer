@@ -1,134 +1,98 @@
-````markdown
-# 🚀 Linux Optimizer: اسکریپت جامع بهینه‌سازی سرور لینوکس
+Linux Optimizer
+This Bash script automates the optimization of your Linux server.
+Notes:
+This script is designed for execution on Linux server environments, including VPS, VDS, Dedicated, and Bare Metal systems. It is not recommended for use on Linux desktop environments.
+Modifying the kernel (options 1 and 2) may result in removing or resetting some GPU drivers.
+Some VMs do not support kernel changes (options 1 and 2). Installing XanMod could cause the VM to break. Please be cautious and test beforehand.
+It performs the following tasks:
+Fix hosts file and DNS (temporarily):
 
-[![GitHub license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/hawshemi/Linux-Optimizer/blob/main/LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/KanekiDevPro/Linux-Optimizer.svg?style=social&label=Star)](https://github.com/KanekiDevPro/Linux-Optimizer)
-[![GitHub forks](https://img.shields.io/github/forks/KanekiDevPro/Linux-Optimizer.svg?style=social&label=Fork)](https://github.com/KanekiDevPro/Linux-Optimizer/fork)
+Check and add 127.0.1.1 and server hostname to /etc/hosts.
+Original hosts file is backed up at /etc/hosts.bak.
 
-این اسکریپت Bash، فرآیند بهینه‌سازی و سخت‌سازی (Hardening) زیرساخت سرور لینوکس شما را به‌صورت کاملاً خودکار انجام می‌دهد. این بهینه‌سازی‌ها برای **حداکثر پرفورمنس، پایداری شبکه و افزایش امنیت** طراحی شده‌اند.
+Add Cloudflare-Security DNS servers (1.1.1.2, 1.0.0.2) nameservers to /etc/resolv.conf.
+Original dns file is backed up at /etc/resolv.conf.bak.
 
-> **توجه:** این اسکریپت برای محیط‌های سرور (VPS، VDS، Dedicated، Bare Metal) طراحی شده و **استفاده از آن در محیط‌های دسکتاپ (Desktop) توصیه نمی‌شود.**
+Update, Upgrade, and Clean the server:
 
----
+Update
+Upgrade
+Full-Upgrade
+AutoRemove
+AutoClean
+Clean
+Disable Terminal Ads (Only on Ubuntu).
 
-## 🛠️ سیستم‌های تست‌شده (OS Compatibility)
+Install XanMod Kernel (Only on Ubuntu & Debian):
 
-| توزیع | وضعیت |
-| :--- | :--- |
-| **Ubuntu** | ۲۰+ (بسیار توصیه شده) |
-| **Debian** | ۱۱+ (بسیار توصیه شده) |
-| **CentOS Stream** | ۸+ |
-| **AlmaLinux** | ۸+ |
-| **Fedora** | ۳۷+ |
+Enable BBRv3.
+CloudFlare TCP Optimizations.
+More Details: https://xanmod.org
+Install Useful Packages:
 
----
+apt-transport-https apt-utils autoconf automake bash-completion bc binutils binutils-common binutils-x86-64-linux-gnu build-essential busybox ca-certificates cron curl dialog epel-release gnupg2 git haveged htop jq keyring libssl-dev libsqlite3-dev libtool locales lsb-release make nano net-tools packagekit preload python3 python3-pip qrencode socat screen software-properties-common ufw unzip vim wget zip
 
-## ⚠️ نکات مهم و هشدارها
+Enable Packages at Server Boot.
 
-* **دسترسی ریشه (Root):** اجرای این اسکریپت **نیاز به دسترسی ریشه** دارد.
-* **تغییر کرنل (Options 1 & 2):**
-    * نصب **XanMod Kernel** ممکن است باعث حذف یا بازنشانی برخی درایورهای GPU شود.
-    * برخی ماشین‌های مجازی (VMs) ممکن است تغییرات کرنل را پشتیبانی نکنند. نصب XanMod در چنین محیط‌هایی می‌تواند منجر به عدم بوت شدن (بریک شدن) VM شود. **لطفاً قبل از اجرا، احتیاط کنید و تست‌های لازم را انجام دهید.**
+Set the server TimeZone to the VPS IP address location.
 
----
+Create & Enable SWAP File:
 
-## 📥 پیش‌نیازها و اجرا (Run)
+Swap Path: "/swapfile"
+Swap Size: 2Gb
+Optimize the SYSCTL Configs:
 
-برای اطمینان از اجرای صحیح، ابتدا پکیج‌های `sudo` و `wget` را نصب کنید:
+Optimize File System Settings.
+Optimize Network Core Settings.
+Optimize SWAP.
+Optimize TCP and UDP Settings.
+Optimize UNIX Domain Sockets Settings.
+Optimize Virtual memory (VM) Settings.
+Optimize Network Configuration Settings.
+Optimize the Kernel.
+Activate BBR (BBRv3 with XanMod).
+Original file is backed up at /etc/sysctl.conf.bak.
 
-### Debian/Ubuntu
-```bash
+Optimize SSH:
+
+Disable DNS lookups for connecting clients.
+Remove less efficient encryption ciphers.
+Enable and Configure TCP keep-alive messages.
+Allow TCP forwarding.
+Enable gateway ports, Tunneling and compression.
+Enable X11 Forwarding.
+Original file is backed up at /etc/ssh/sshd_config.bak.
+
+Optimize the System Limits:
+
+Soft and Hard ulimit -c -d -f -i -l -n -q -s -u -v -x optimizations.
+Optimize UFW and open Common Ports:
+
+Open Ports SSH, 80, 443.
+With IPv6, TCP & UDP.
+Reboot at the end is recommended.
+
+Prerequisites
+Ensure that the sudo and wget packages are installed on your system:
+Ubuntu & Debian:
 sudo apt update -q && sudo apt install -y sudo wget
-````
-
-### CentOS/RHEL/Fedora/AlmaLinux
-
-```bash
+CentOS & Fedora:
 sudo dnf up -y && sudo dnf install -y sudo wget
-```
+Run
+Tested on: Ubuntu 20+, Debian 11+, CentOS Stream 8+, AlmaLinux 8+, Fedora 37+
+Root Access is Required. If the user is not root, first run:
+sudo -i
+Then:
+wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh 
+Menu Image
+Debian & Ubuntu:
+debian-based-menu
 
-### اجرای اسکریپت
+CentOS, AlmaLinux & Fedora:
+rhel-based-menu
 
-دسترسی ریشه ضروری است. در صورت نیاز، ابتدا اجرا کنید: `sudo -i`
+Disclaimer
+This script is provided as-is, without any warranty or guarantee. Use it at your own risk.
 
-```bash
-wget "[https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh](https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh)" -O linux-optimizer.sh \
-&& chmod +x linux-optimizer.sh \
-&& bash linux-optimizer.sh
-```
-
------
-
-## ✨ ویژگی‌های اصلی و بهینه‌سازی‌ها
-
-این اسکریپت وظایف زیر را به ترتیب انجام می‌دهد:
-
-### ۱. شبکه و پایداری اولیه (Network & Initial Stability)
-
-  * **DNS & Hosts Fix:**
-      * بررسی و افزودن `127.0.1.1` و نام هاست سرور به `/etc/hosts`.
-      * تنظیم **DNS عمومی** و پایدار (مانند Google DNS و Cloudflare) در `systemd-resolved` (اصلاح دائمی).
-      * **بک‌آپ گیری:** از فایل‌های اصلی `/etc/hosts` و `/etc/resolv.conf` در دایرکتوری `/etc/` بک‌آپ گرفته می‌شود.
-  * **TimeZone:** تنظیم خودکار منطقه زمانی سرور بر اساس موقعیت جغرافیایی آدرس IP VPS.
-
-### ۲. نگهداری و نصب پکیج‌ها (Maintenance & Packages)
-
-  * **آپدیت کامل سیستم:** انجام `update`، `upgrade`، `full-upgrade` و پاکسازی کامل سیستم (`autoremove`, `autoclean`, `clean`).
-  * **بسته‌های کاربردی:** نصب بیش از ۳۰ پکیج ضروری توسعه، شبکه و ابزارهای سیستم (مانند `htop`, `git`, `curl`, `jq`, `vim`, `build-essential`, `ufw`).
-  * **فعال‌سازی سرویس‌ها:** فعال‌سازی سرویس‌هایی مانند `cron`, `haveged` و `preload` در زمان بوت.
-  * **حذف تبلیغات:** غیرفعال کردن تبلیغات ترمینال (MOTD) در Ubuntu.
-
-### ۳. بهینه‌سازی هسته و حافظه (Kernel & Memory)
-
-  * **نصب XanMod Kernel (توصیه شده):**
-      * نصب هسته بهینه شده بر اساس سطح CPU شما (v1 تا v4).
-      * فعال‌سازی **BBRv3** و بهینه‌سازی‌های TCP شرکت Cloudflare.
-      * جزئیات بیشتر: [XanMod.org](https://xanmod.org)
-  * **SWAP File Creation:**
-      * ایجاد و فعال‌سازی یک فایل **SWAP به اندازه ۲ گیگابایت** در مسیر `/swapfile`.
-
-### ۴. تنظیمات پرفورمنس و امنیتی (Performance & Security)
-
-  * **بهینه‌سازی SYSCTL (`/etc/sysctl.conf`):**
-      * حذف تمام تنظیمات قدیمی برای تمیزکاری.
-      * تنظیم دقیق پارامترهای حافظه مجازی (VM)، بافر‌های TCP/UDP و صف‌های شبکه.
-      * فعال‌سازی الگوریتم **BBR** برای کنترل ازدحام شبکه.
-      * بک‌آپ در `/etc/sysctl.conf.bak`.
-  * **بهینه‌سازی SSH (`/etc/ssh/sshd_config`):**
-      * غیرفعال‌سازی DNS Lookups (افزایش سرعت اتصال).
-      * استفاده از Ciphers قوی‌تر.
-      * تنظیم KeepAlive، فعال‌سازی Port Forwarding و Tunneling.
-      * بک‌آپ در `/etc/ssh/sshd_config.bak`.
-  * **بهینه‌سازی System Limits (`ulimit`):**
-      * افزایش محدودیت‌های سیستم برای منابع حیاتی (مانند حداکثر تعداد فایل‌های باز به **۱,۰۴۸,۵۷۶**).
-  * **پیکربندی UFW (Firewall):**
-      * نصب و فعال‌سازی فایروال UFW.
-      * باز کردن پورت‌های ضروری: **SSH** (پورت خودکار)، **۸۰ (HTTP)** و **۴۴۳ (HTTPS)**.
-      * تنظیم UFW برای استفاده از بهینه‌سازی‌های `sysctl` سیستم.
-
------
-
-## 💻 نمای ظاهری منو (Menu Preview)
-
-این اسکریپت دارای یک منوی تعاملی است که به شما امکان می‌دهد نوع بهینه‌سازی را انتخاب کنید:
-
-### Debian & Ubuntu
-
-### CentOS, AlmaLinux & Fedora
-
------
-
-## ⚖️ لایسنس (License)
-
-این اسکریپت تحت [**MIT License**](https://choosealicense.com/licenses/mit/) منتشر شده است.
-
------
-
-## 🛑 سلب مسئولیت (Disclaimer)
-
-این اسکریپت به همان شکلی که هست (As-Is) ارائه شده است و هیچ گونه ضمانت یا گارانتی ارائه نمی‌دهد. استفاده از آن به عهده و مسئولیت خود کاربر است.
-
-```
-
-حالا می‌توانید تمام محتوای بالا را با یک کلیک کپی کرده و در فایل `README.md` مخزن گیت‌هاب خود قرار دهید!
-```
+License
+This script is licensed under the MIT License.
