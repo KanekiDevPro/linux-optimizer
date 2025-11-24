@@ -92,27 +92,38 @@ install_dependencies_rhel_based() {
 }
 
 
-# Fix Hosts file
-fix_etc_hosts(){ 
-  echo 
-  yellow_msg "Fixing Hosts file."
-  sleep 0.5
-
-  cp $HOST_PATH /etc/hosts.bak
-  yellow_msg "Default hosts file saved. Directory: /etc/hosts.bak"
-  sleep 0.5
-
-  if ! grep -q $(hostname) $HOST_PATH; then
-    echo "127.0.1.1 $(hostname)" | sudo tee -a $HOST_PATH > /dev/null
-    green_msg "Hosts Fixed."
-    echo 
+fix_dns(){
+    echo
+    yellow_msg "Fixing DNS Permanently with systemd-resolved..."
     sleep 0.5
-  else
-    green_msg "Hosts OK. No changes made."
-    echo 
+
+    # systemd-resolved فعال باشه
+    if ! systemctl is-active --quiet systemd-resolved; then
+        red_msg "systemd-resolved is not active! Starting it..."
+        sudo systemctl enable --now systemd-resolved
+        sleep 1
+    fi
+
+    # Backup
+    BACKUP_PATH="/etc/resolv.conf.bak.$(date +%Y%m%d%H%M%S)"
+    sudo cp /etc/resolv.conf "$BACKUP_PATH"
+    yellow_msg "Backup of resolv.conf created at $BACKUP_PATH"
     sleep 0.5
-  fi
+
+    # پیدا کردن interface های UP به جز loopback
+    interfaces=$(ip -o link show up | awk -F': ' '{print $2}' | grep -v lo)
+
+    # ست کردن DNS روی همه interface های واقعی
+    for iface in $interfaces; do
+        sudo resolvectl dns "$iface" 1.1.1.1 8.8.8.8 2606:4700:4700::1111 2001:4860:4860::8888
+        sudo resolvectl domain "$iface" "~."
+    done
+
+    green_msg "DNS has been updated permanently. Current DNS status:"
+    resolvectl status
+    echo
 }
+
 
 
 # Fix DNS Permanently
