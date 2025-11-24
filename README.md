@@ -50,7 +50,7 @@
     - Swap Size: `2Gb`
 
 
-8. Optimize the [SYSCTL](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf) Configs:
+8. Optimize the [SYSCTL](https://github.com/KanekiDevPro/Linux-Optimizer/blob/main/files/sysctl.conf) Configs:
     - Optimize File System Settings.
     - Optimize Network Core Settings.
     - Optimize `SWAP`.
@@ -64,7 +64,7 @@
     *Original file is backed up at `/etc/sysctl.conf.bak`.*
 
     
-9. Optimize [SSH](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sshd_config):
+9. Optimize [SSH](https://github.com/KanekiDevPro/Linux-Optimizer/blob/main/files/sshd_config):
     - Disable DNS lookups for connecting clients.
     - Remove less efficient encryption ciphers.
     - Enable and Configure TCP keep-alive messages.
@@ -75,7 +75,7 @@
     *Original file is backed up at `/etc/ssh/sshd_config.bak`.*
    
 
-10. Optimize the [System Limits](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/profile):
+10. Optimize the [System Limits](https://github.com/KanekiDevPro/Linux-Optimizer/blob/main/files/profile):
     - Soft and Hard *ulimit* `-c -d -f -i -l -n -q -s -u -v -x` optimizations.
     
     
@@ -110,16 +110,16 @@ sudo -i
 ```
 #### Then:
 ```
-wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh 
+wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh 
 ```
 
 
 ## Menu Image
 ### Debian & Ubuntu:
-![debian-based-menu](https://github.com/hawshemi/Linux-Optimizer/assets/16742123/3604470e-48ed-403d-a753-143dc934f6fd)
+![debian-based-menu](https://github.com/KanekiDevPro/Linux-Optimizer/assets/16742123/3604470e-48ed-403d-a753-143dc934f6fd)
 
 ### CentOS, AlmaLinux & Fedora:
-![rhel-based-menu](https://github.com/hawshemi/Linux-Optimizer/assets/16742123/07099e64-3864-425f-83e2-cda1e57d5b62)
+![rhel-based-menu](https://github.com/KanekiDevPro/Linux-Optimizer/assets/16742123/07099e64-3864-425f-83e2-cda1e57d5b62)
 
 
 
