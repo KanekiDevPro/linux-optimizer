@@ -98,11 +98,14 @@ fix_etc_hosts(){
   yellow_msg "Fixing Hosts file."
   sleep 0.5
 
-  cp $HOST_PATH /etc/hosts.bak
+  # استفاده از sudo برای تضمین مجوز کپی در /etc
+  sudo cp $HOST_PATH /etc/hosts.bak
   yellow_msg "Default hosts file saved. Directory: /etc/hosts.bak"
   sleep 0.5
 
-  if ! grep -q $(hostname) $HOST_PATH; then
+  # استفاده از سوییچ -w برای تطبیق کلمه کامل
+  if ! grep -q -w "$(hostname)" $HOST_PATH; then
+    # 127.0.1.1 برای حل و فصل نام هاست در دبیان/اوبونتو ضروری است
     echo "127.0.1.1 $(hostname)" | sudo tee -a $HOST_PATH > /dev/null
     green_msg "Hosts Fixed."
     echo 
