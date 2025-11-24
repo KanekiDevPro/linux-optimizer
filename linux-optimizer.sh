@@ -118,42 +118,48 @@ fix_etc_hosts(){
 # Fix DNS Temporarily
 fix_dns(){
     echo
-    yellow_msg "Applying Best Practice DNS Settings (Systemd)..."
+    yellow_msg "Configuring Systemd-Resolved (The Standard Way)..."
     sleep 0.5
 
-    CONFIG_FILE="/etc/systemd/resolved.conf"
+    # 1. اصلاح فایل کانفیگ اصلی (بدون نیاز به nano)
+    # این دستورات تنظیمات قبلی را پاک کرده و DNS جدید را جایگزین می‌کنند
+    local CONFIG_FILE="/etc/systemd/resolved.conf"
     
-    # 1. بک‌آپ از فایل کانفیگ
-    if [ ! -f "$CONFIG_FILE.bak" ]; then
-        sudo cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
-    fi
+    # بک‌آپ‌گیری محض احتیاط
+    [ ! -f "$CONFIG_FILE.bak" ] && sudo cp "$CONFIG_FILE" "$CONFIG_FILE.bak"
 
-    # 2. تنظیم DNSها داخل فایل کانفیگ با sed (بدون نیاز به باز کردن فایل)
-    # این دستورات خط‌های DNS را پیدا کرده و مقدار جدید را جایگزین می‌کنند
+    # استفاده از sed برای تغییر مقادیر DNS و FallbackDNS
+    # اگر خط وجود داشت تغییرش بده، اگر کامنت بود آن‌کامنت کن
     sudo sed -i 's/^#\?DNS=.*/DNS=8.8.8.8 8.8.4.4 1.1.1.1/' "$CONFIG_FILE"
     sudo sed -i 's/^#\?FallbackDNS=.*/FallbackDNS=1.0.0.1 9.9.9.9/' "$CONFIG_FILE"
     
-    yellow_msg "Systemd-resolved config updated."
+    # اگر خط‌ها اصلا وجود نداشتند، به ته فایل اضافه کن (برای اطمینان)
+    if ! grep -q "^DNS=" "$CONFIG_FILE"; then
+        echo "DNS=8.8.8.8 8.8.4.4 1.1.1.1" | sudo tee -a "$CONFIG_FILE" > /dev/null
+    fi
+    
+    yellow_msg "Configuration updated in $CONFIG_FILE"
+    sleep 0.5
 
-    # 3. اصلاح حیاتی Symlink (این بخش جادو را انجام می‌دهد)
-    # این کار باعث می‌شود تمام سیستم مجبور شود از سرویس systemd اطاعت کند
-    if [ -f "/etc/resolv.conf" ] || [ -L "/etc/resolv.conf" ]; then
+    # 2. اصلاح سیم‌لینک (مهم‌ترین بخش برای جلوگیری از بازنویسی توسط سیستم)
+    # این فایل باید به stub-resolv.conf اشاره کند تا DNS لوکال سیستم فعال شود
+    
+    if [ -L "/etc/resolv.conf" ] || [ -f "/etc/resolv.conf" ]; then
         sudo rm -f /etc/resolv.conf
     fi
     
     sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
-    yellow_msg "Symlink corrected (/etc/resolv.conf -> stub-resolv.conf)"
+    green_msg "Symlink fixed: /etc/resolv.conf -> /run/systemd/resolve/stub-resolv.conf"
 
-    # 4. اعمال تغییرات
+    # 3. اعمال تغییرات و ریستارت سرویس
     sudo systemctl daemon-reload
     sudo systemctl enable --now systemd-resolved
     sudo systemctl restart systemd-resolved
-
+    
     echo
-    green_msg "DNS is now Permanent and System-wide."
-    echo "Active DNS Servers:"
-    resolvectl status --no-pager | grep "DNS Servers" -A 1
-    echo
+    green_msg "DNS Fixed Permanently via Systemd Config."
+    echo "Current Status:"
+    resolvectl status --no-pager | grep "DNS Servers" -A 2
 }
 
 
