@@ -1,20 +1,4 @@
 #!/bin/bash
-# CHANGELOG — fixes applied (drop-in replacement):
-# F1: Pristine .orig backup guard for sysctl/sshd_config
-# F2: Reliable SSH port via sshd -T + head -n1 fallback
-# F3: Lockout guard (validate SSH_PORT before UFW enable)
-# F4: Remove preload, add apt group error checks, fix typo
-# F5: Idempotent swap_maker (swapon/fstab guards)
-# F6: XanMod hardening (gpg --yes, https, CPU regex, no exit)
-# F7: DEBIAN_FRONTEND=noninteractive for upgrades
-# F8: sshd -t before restart, restart tolerance ssh/sshd
-# F9: Fix Ciphers (delete ^Ciphers, append correctly)
-# F10: ask_reboot EOF/Q handling, menu Q
-# F11: Remove duplicate ulimit -s sed
-# F12: Comment overcommit if no swap + warning
-# F13: Guard motd-news/pro; P1-P4: quoting, ufw --force, tput guard, var reuse
-# Original project: https://github.com/KanekiDevPro/Linux-Optimizer
-
 # Green, Yellow & Red Messages.
 green_msg() {
     if [ -t 1 ] && command -v tput >/dev/null 2>&1; then
@@ -72,10 +56,6 @@ check_if_running_as_root() {
 # Check Root
 check_if_running_as_root
 sleep 0.5
-detect_resources
-sleep 0.5
-
-
 # Detect hardware resources for adaptive tuning (runs once per invocation).
 detect_resources() {
     RAM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
@@ -87,6 +67,9 @@ detect_resources() {
     RAM_PAGES=$((RAM_KB / 4))                               ## Approximate 4KB pages
     yellow_msg "Detected Resources: ${RAM_GB}GB RAM / ${CPU_COUNT} vCPU — Adaptive mode ON."
 }
+# Run detection (AFTER definition)
+detect_resources
+sleep 0.5
 
 # Ask Reboot
 ask_reboot() {
@@ -199,52 +182,45 @@ EOF
             return
         fi
 
-        if [ "$cpu_level" -ge 1 ] && [ "$cpu_level" -le 4 ]; then
-            echo 
-            yellow_msg "CPU Level: v$cpu_level"
-            echo 
+        echo 
+        yellow_msg "CPU Level: v$cpu_level"
+        echo 
 
-            ## Add the XanMod repository key
-            # Define a temporary file for the GPG key
-            tmp_keyring="/tmp/xanmod-archive-keyring.gpg"
+        ## Add the XanMod repository key
+        # Define a temporary file for the GPG key
+        tmp_keyring="/tmp/xanmod-archive-keyring.gpg"
 
-            # Try downloading the GPG key from the XanMod link first
-            if ! wget -qO "$tmp_keyring" https://dl.xanmod.org/archive.key || ! [ -s "$tmp_keyring" ]; then
-                # If the first attempt fails, try the GitLab link
-                if ! wget -qO "$tmp_keyring" https://gitlab.com/afrd.gpg || ! [ -s "$tmp_keyring" ]; then
-                    red_msg "Both attempts to download the GPG key failed or the file was empty. Exiting."
-                    rm -f "$tmp_keyring"
-                    return
-                fi
+        # Try downloading the GPG key from the XanMod link first
+        if ! wget -qO "$tmp_keyring" https://dl.xanmod.org/archive.key || ! [ -s "$tmp_keyring" ]; then
+            # If the first attempt fails, try the GitLab link
+            if ! wget -qO "$tmp_keyring" https://gitlab.com/afrd.gpg || ! [ -s "$tmp_keyring" ]; then
+                red_msg "Both attempts to download the GPG key failed or the file was empty. Exiting."
+                rm -f "$tmp_keyring"
+                return
             fi
-
-            # If we reach this point, it means we have a non-empty GPG file
-            # Now dearmor the GPG key and move to the final location
-            sudo gpg --dearmor --yes -o /usr/share/keyrings/xanmod-archive-keyring.gpg "$tmp_keyring"
-
-            # Clean up the temporary file
-            rm -f "$tmp_keyring"
-
-            ## Add the XanMod repository
-            echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] https://deb.xanmod.org releases main' | sudo tee /etc/apt/sources.list.d/xanmod-release.list
-            
-            ## Install XanMod
-            sudo apt update -q && sudo apt install "linux-xanmod-x64v$cpu_level" -y
-
-            ## Clean up
-            sudo apt update -q
-            sudo apt autoremove --purge -y
-            
-            echo 
-            green_msg "XanMod Kernel Installed. Reboot to Apply the new Kernel."
-            echo 
-            sleep 1
-        else
-            echo 
-            red_msg "Unsupported CPU. (Check the supported CPUs at xanmod.org)"
-            echo 
-            sleep 2
         fi
+
+        # If we reach this point, it means we have a non-empty GPG file
+        # Now dearmor the GPG key and move to the final location
+        sudo gpg --dearmor --yes -o /usr/share/keyrings/xanmod-archive-keyring.gpg "$tmp_keyring"
+
+        # Clean up the temporary file
+        rm -f "$tmp_keyring"
+
+        ## Add the XanMod repository
+        echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] https://deb.xanmod.org releases main' | sudo tee /etc/apt/sources.list.d/xanmod-release.list
+        
+        ## Install XanMod
+        sudo apt update -q && sudo apt install "linux-xanmod-x64v$cpu_level" -y
+
+        ## Clean up
+        sudo apt update -q
+        sudo apt autoremove --purge -y
+        
+        echo 
+        green_msg "XanMod Kernel Installed. Reboot to Apply the new Kernel."
+        echo 
+        sleep 1
         
     fi
 }
@@ -980,7 +956,7 @@ show_menu() {
 main() {
     while true; do
         show_menu
-        read -p 'Enter Your Choice: ' choice
+        read -p 'Enter Your Choice: ' choice || { echo ; exit 0 ; }
         case "$choice" in
         1)
             apply_everything
