@@ -1,61 +1,56 @@
 #!/bin/bash
-# https://github.com/hawshemi/Linux-Optimizer
 
+set -o pipefail
 
 # Green, Yellow & Red Messages.
 green_msg() {
-    tput setaf 2
+    tput setaf 2 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
 
 yellow_msg() {
-    tput setaf 3
+    tput setaf 3 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
 
 red_msg() {
-    tput setaf 1
+    tput setaf 1 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
-
 
 # Declare Paths & Settings.
 SYS_PATH="/etc/sysctl.conf"
+SYS_OPTIMIZER_PATH="/etc/sysctl.d/99-optimizer.conf"
 PROF_PATH="/etc/profile"
-SSH_PORT=""
 SSH_PATH="/etc/ssh/sshd_config"
 SWAP_PATH="/swapfile"
-SWAP_SIZE=2G
-
+SWAP_SIZE="2G"
+LIMITS_CONF="/etc/security/limits.d/99-optimizer.conf"
 
 # Root
 check_if_running_as_root() {
-    ## If you want to run as another user, please modify $EUID to be owned by this user
-    if [[ "$EUID" -ne '0' ]]; then
-      echo 
+    if [[ "$(id -u)" -ne 0 ]]; then
+      echo
       red_msg 'Error: You must run this script as root!'
-      echo 
+      echo
       sleep 0.5
       exit 1
     fi
 }
 
-
-# Check Root
 check_if_running_as_root
 sleep 0.5
-
 
 # Ask Reboot
 ask_reboot() {
     yellow_msg 'Reboot now? (Recommended) (y/n)'
-    echo 
+    echo
     while true; do
-        read choice
-        echo 
+        read -r choice
+        echo
         if [[ "$choice" == 'y' || "$choice" == 'Y' ]]; then
             sleep 0.5
             reboot
@@ -64,935 +59,849 @@ ask_reboot() {
         if [[ "$choice" == 'n' || "$choice" == 'N' ]]; then
             break
         fi
+        yellow_msg 'Please answer y or n.'
     done
 }
 
-
 # Update & Upgrade & Remove & Clean
 complete_update() {
-    echo 
+    echo
     yellow_msg 'Updating the System... (This can take a while.)'
-    echo 
+    echo
     sleep 0.5
 
-    sudo apt -q update
-    sudo apt -y upgrade
-    sudo apt -y full-upgrade
-    sudo apt -y autoremove
-    sleep 0.5
+    export DEBIAN_FRONTEND=noninteractive
+    apt -q update
+    apt -y upgrade
+    apt -y full-upgrade
+    apt -y autoremove --purge
+    apt -y autoclean
+    apt -y clean
+    apt -q update
 
-    ## Again :D
-    sudo apt -y -q autoclean
-    sudo apt -y clean
-    sudo apt -q update
-    sudo apt -y upgrade
-    sudo apt -y full-upgrade
-    sudo apt -y autoremove --purge
-
-    echo 
+    echo
     green_msg 'System Updated & Cleaned Successfully.'
-    echo 
+    echo
     sleep 0.5
 }
-
 
 # Disable Terminal Ads
 disable_terminal_ads() {
-    echo 
+    echo
     yellow_msg 'Disabling Terminal Ads...'
-    echo 
+    echo
     sleep 0.5
 
-    sed -i 's/ENABLED=1/ENABLED=0/g' /etc/default/motd-news
-    pro config set apt_news=false
-
-    echo 
-    green_msg 'Terminal Ads Disabled.'
-    echo 
-    sleep 0.5
-}
-
-
-# Install XanMod Kernel
-install_xanmod() {
-    echo 
-    yellow_msg 'Checking XanMod...'
-    echo 
-    sleep 0.5
-
-    if uname -r | grep -q 'xanmod'; then
-        green_msg 'XanMod is already installed.'
-        echo 
-        sleep 0.5
-    else
-        echo 
-        yellow_msg 'XanMod not found. Installing XanMod Kernel...'
-        echo 
-        sleep 0.5
-
-        ## Update, Upgrade & Install dependencies
-        sudo apt update -q
-        sudo apt upgrade -y
-        sudo apt install wget curl gpg -y
-
-        ## Check the CPU level
-        cpu_level=$(awk -f - <<EOF
-        BEGIN {
-            while (!/flags/) if (getline < "/proc/cpuinfo" != 1) exit 1
-            if (/lm/&&/cmov/&&/cx8/&&/fpu/&&/fxsr/&&/mmx/&&/syscall/&&/sse2/) level = 1
-            if (level == 1 && /cx16/&&/lahf/&&/popcnt/&&/sse4_1/&&/sse4_2/&&/ssse3/) level = 2
-            if (level == 2 && /avx/&&/avx2/&&/bmi1/&&/bmi2/&&/f16c/&&/fma/&&/abm/&&/movbe/&&/xsave/) level = 3
-            if (level == 3 && /avx512f/&&/avx512bw/&&/avx512cd/&&/avx512dq/&&/avx512vl/) level = 4
-            if (level > 0) { print level; exit level + 1 }
-            exit 1
-        }
-EOF
-        )
-
-        if [ "$cpu_level" -ge 1 ] && [ "$cpu_level" -le 4 ]; then
-            echo 
-            yellow_msg "CPU Level: v$cpu_level"
-            echo 
-
-            ## Add the XanMod repository key
-            # Define a temporary file for the GPG key
-            tmp_keyring="/tmp/xanmod-archive-keyring.gpg"
-
-            # Try downloading the GPG key from the XanMod link first
-            if ! wget -qO $tmp_keyring https://dl.xanmod.org/archive.key || ! [ -s $tmp_keyring ]; then
-                # If the first attempt fails, try the GitLab link
-                if ! wget -qO $tmp_keyring https://gitlab.com/afrd.gpg || ! [ -s $tmp_keyring ]; then
-                    echo "Both attempts to download the GPG key failed or the file was empty. Exiting."
-                    exit 1
-                fi
-            fi
-
-            # If we reach this point, it means we have a non-empty GPG file
-            # Now dearmor the GPG key and move to the final location
-            sudo gpg --dearmor -o /usr/share/keyrings/xanmod-archive-keyring.gpg $tmp_keyring
-
-            # Clean up the temporary file
-            rm -f $tmp_keyring
-
-            ## Add the XanMod repository
-            echo 'deb [signed-by=/usr/share/keyrings/xanmod-archive-keyring.gpg] http://deb.xanmod.org releases main' | sudo tee /etc/apt/sources.list.d/xanmod-release.list
-            
-            ## Install XanMod
-            sudo apt update -q && sudo apt install "linux-xanmod-x64v$cpu_level" -y
-
-            ## Clean up
-            sudo apt update -q
-            sudo apt autoremove --purge -y
-            
-            echo 
-            green_msg "XanMod Kernel Installed. Reboot to Apply the new Kernel."
-            echo 
-            sleep 1
-        else
-            echo 
-            red_msg "Unsupported CPU. (Check the supported CPUs at xanmod.org)"
-            echo 
-            sleep 2
-        fi
-        
+    if [ -f /etc/default/motd-news ]; then
+        sed -i 's/ENABLED=1/ENABLED=0/g' /etc/default/motd-news
     fi
+    if command -v pro >/dev/null 2>&1; then
+        pro config set apt_news=false || true
+    fi
+
+    echo
+    green_msg 'Terminal Ads Disabled.'
+    echo
+    sleep 0.5
 }
 
-
-# Install useful packages
+# Install useful packages - FIXED: per-package loop, single failure doesn't abort all
 installations() {
-    echo 
+    echo
     yellow_msg 'Installing Useful Packages...'
-    echo 
+    echo
     sleep 0.5
 
-    ## Networking packages
-    sudo apt -y install apt-transport-https
+    export DEBIAN_FRONTEND=noninteractive
+    apt -q update || yellow_msg "apt update had warnings, continuing..."
 
-    ## System utilities
-    sudo apt -y install apt-utils bash-completion busybox ca-certificates cron curl gnupg2 locales lsb-release nano preload screen software-properties-common ufw unzip vim wget xxd zip
+    # FIX: Install packages individually so one missing package doesn't fail entire batch
+    # Common failure: preload, haveged, busybox, binutils-x86-64-linux-gnu removed on newer Ubuntu
+    packages=(
+        # Networking
+        apt-transport-https
+        # System utilities
+        apt-utils bash-completion busybox ca-certificates cron curl gnupg2 locales lsb-release nano preload screen software-properties-common ufw unzip vim wget xxd zip
+        # Programming / dev tools
+        autoconf automake build-essential git libtool make pkg-config python3 python3-pip
+        # Additional libs
+        bc binutils binutils-common binutils-x86-64-linux-gnu ubuntu-keyring haveged jq libsodium-dev libsqlite3-dev libssl-dev packagekit qrencode socat
+        # Misc
+        dialog htop net-tools
+    )
 
-    ## Programming and development tools
-    sudo apt -y install autoconf automake bash-completion build-essential git libtool make pkg-config python3 python3-pip
+    failed_pkgs=()
+    for pkg in "${packages[@]}"; do
+        # Skip empty
+        [ -z "$pkg" ] && continue
+        yellow_msg "Installing $pkg ..."
+        if ! apt -y install "$pkg" 2>&1; then
+            yellow_msg "Warning: failed to install $pkg, skipping (package may not exist on this release)"
+            failed_pkgs+=("$pkg")
+        fi
+    done
 
-    ## Additional libraries and dependencies
-    sudo apt -y install bc binutils binutils-common binutils-x86-64-linux-gnu ubuntu-keyring haveged jq libsodium-dev libsqlite3-dev libssl-dev packagekit qrencode socat
+    if [ ${#failed_pkgs[@]} -gt 0 ]; then
+        yellow_msg "Some packages failed/skipped: ${failed_pkgs[*]}"
+        yellow_msg "This is normal on some Ubuntu/Debian releases (e.g., preload, haveged renamed)."
+    fi
 
-    ## Miscellaneous
-    sudo apt -y install dialog htop net-tools
-
-    echo 
+    echo
     green_msg 'Useful Packages Installed Succesfully.'
-    echo 
+    echo
     sleep 0.5
 }
-
 
 # Enable packages at server boot
 enable_packages() {
-    sudo systemctl enable cron haveged preload
-    echo 
+    # FIX: only enable services that exist
+    for svc in cron haveged preload; do
+        if systemctl list-unit-files | grep -q "^${svc}.service"; then
+            systemctl enable "$svc" 2>/dev/null || true
+        fi
+    done
+    echo
     green_msg 'Packages Enabled Successfully.'
     echo
     sleep 0.5
 }
 
-
-## Swap Maker
+## Swap Maker - FIXED
 swap_maker() {
-    echo 
+    echo
     yellow_msg 'Making SWAP Space...'
-    echo 
+    echo
     sleep 0.5
 
-    ## Make Swap
-    sudo fallocate -l $SWAP_SIZE $SWAP_PATH  ## Allocate size
-    sudo chmod 600 $SWAP_PATH                ## Set proper permission
-    sudo mkswap $SWAP_PATH                   ## Setup swap         
-    sudo swapon $SWAP_PATH                   ## Enable swap
-    echo "$SWAP_PATH   none    swap    sw    0   0" >> /etc/fstab ## Add to fstab
-    echo 
+    # Validate SWAP_SIZE format (e.g., 2G, 1024M) - case-insensitive
+    if ! [[ "$SWAP_SIZE" =~ ^[0-9]+[GMKgmk]?$ ]]; then
+        red_msg "Invalid SWAP_SIZE: $SWAP_SIZE (use e.g., 2G)"
+        return 1
+    fi
+
+    # Check if swap already active on this path
+    if swapon --show=NAME --noheadings 2>/dev/null | grep -q "^${SWAP_PATH}$"; then
+        yellow_msg "Swap $SWAP_PATH is already active. Turning off to recreate..."
+        swapoff "$SWAP_PATH" 2>/dev/null || {
+            red_msg "Failed to swapoff $SWAP_PATH - maybe in use"
+            return 1
+        }
+    fi
+
+    # Check if file exists and remove old entry from fstab first to avoid duplicates
+    if [ -f "$SWAP_PATH" ]; then
+        yellow_msg "Old swap file found at $SWAP_PATH, removing..."
+        rm -f "$SWAP_PATH"
+    fi
+
+    # Remove duplicate fstab entries (FIX: prevent duplicate on re-run)
+    if grep -qF "$SWAP_PATH" /etc/fstab; then
+        yellow_msg "Removing old fstab entry for $SWAP_PATH"
+        # Backup fstab
+        cp /etc/fstab "/etc/fstab.bak.$(date +%F-%H%M%S)"
+        sed -i "\|$SWAP_PATH|d" /etc/fstab
+    fi
+
+    # Check available disk space (need at least SWAP_SIZE + 100MB)
+    # FIX: check filesystem of SWAP_PATH directory, not hardcoded /
+    # FIX: remove numfmt dependency (not always available) - use pure bash
+    swap_dir=$(dirname "$SWAP_PATH")
+    # Fallback to / if dirname doesn't exist yet
+    [ -d "$swap_dir" ] || swap_dir="/"
+    # Use --output to be robust against df header variations
+    avail_mb=$(df -m --output=avail "$swap_dir" 2>/dev/null | tail -n1 | tr -d ' ')
+    # Pure bash conversion of SWAP_SIZE to MB (no numfmt)
+    case "$SWAP_SIZE" in
+        *G|*g) swap_mb=$((${SWAP_SIZE%[Gg]} * 1024)) ;;
+        *M|*m) swap_mb=${SWAP_SIZE%[Mm]} ;;
+        *K|*k) swap_mb=$((${SWAP_SIZE%[Kk]} / 1024)); [ "$swap_mb" -eq 0 ] && swap_mb=1 ;;
+        *)     swap_mb=$((SWAP_SIZE / 1024 / 1024)); [ "$swap_mb" -eq 0 ] && swap_mb=2048 ;;
+    esac
+    # Validate numeric
+    if ! [[ "$avail_mb" =~ ^[0-9]+$ ]]; then
+        yellow_msg "Warning: could not determine free space for $swap_dir, skipping space check"
+    elif [ "$avail_mb" -lt $((swap_mb + 100)) ]; then
+        red_msg "Not enough disk space on $swap_dir. Available: ${avail_mb}M, Required: ${swap_mb}M + 100M overhead"
+        return 1
+    fi
+
+    # Allocate swap file - try fallocate, fallback to dd (fallocate fails on some FS like XFS, btrfs)
+    yellow_msg "Allocating $SWAP_SIZE at $SWAP_PATH..."
+    if ! fallocate -l "$SWAP_SIZE" "$SWAP_PATH" 2>/dev/null; then
+        yellow_msg "fallocate failed, using dd (slower but compatible)..."
+        # dd fallback: calculate count (case-insensitive, consistent with swap_mb)
+        # Use 1M blocks
+        case "$SWAP_SIZE" in
+            *G|*g) count=$((${SWAP_SIZE%[Gg]} * 1024)) ;;
+            *M|*m) count=${SWAP_SIZE%[Mm]} ;;
+            *K|*k) count=$((${SWAP_SIZE%[Kk]} / 1024)); [ "$count" -eq 0 ] && count=1 ;;
+            *)     count=$((SWAP_SIZE / 1024 / 1024)); [ "$count" -eq 0 ] && count=2048 ;;
+        esac
+        if ! dd if=/dev/zero of="$SWAP_PATH" bs=1M count="$count" status=progress; then
+            red_msg "Failed to create swap file via dd"
+            rm -f "$SWAP_PATH"
+            return 1
+        fi
+    fi
+
+    chmod 600 "$SWAP_PATH"
+    if ! mkswap "$SWAP_PATH"; then
+        red_msg "mkswap failed"
+        rm -f "$SWAP_PATH"
+        return 1
+    fi
+    if ! swapon "$SWAP_PATH"; then
+        red_msg "swapon failed - check dmesg"
+        return 1
+    fi
+
+    # Add to fstab only if not already present (idempotent)
+    if ! grep -qF "$SWAP_PATH" /etc/fstab; then
+        echo "$SWAP_PATH   none    swap    sw    0   0" >> /etc/fstab
+    fi
+
+    # Verify
+    swapon --show | grep -q "$SWAP_PATH" && green_msg "SWAP Created Successfully: $(swapon --show | grep "$SWAP_PATH")" || red_msg "SWAP creation verification failed"
+
+    echo
     green_msg 'SWAP Created Successfully.'
     echo
     sleep 0.5
 }
 
-
-# SYSCTL Optimization
+# SYSCTL Optimization - FIXED
 sysctl_optimizations() {
-    ## Make a backup of the original sysctl.conf file
-    cp $SYS_PATH /etc/sysctl.conf.bak
-
-    echo 
-    yellow_msg 'Default sysctl.conf file Saved. Directory: /etc/sysctl.conf.bak'
-    echo 
-    sleep 1
-
-    echo 
-    yellow_msg 'Optimizing the Network...'
-    echo 
+    echo
+    yellow_msg 'Optimizing Network via sysctl...'
+    echo
     sleep 0.5
 
-    sed -i -e '/fs.file-max/d' \
-        -e '/net.core.default_qdisc/d' \
-        -e '/net.core.netdev_max_backlog/d' \
-        -e '/net.core.optmem_max/d' \
-        -e '/net.core.somaxconn/d' \
-        -e '/net.core.rmem_max/d' \
-        -e '/net.core.wmem_max/d' \
-        -e '/net.core.rmem_default/d' \
-        -e '/net.core.wmem_default/d' \
-        -e '/net.ipv4.tcp_rmem/d' \
-        -e '/net.ipv4.tcp_wmem/d' \
-        -e '/net.ipv4.tcp_congestion_control/d' \
-        -e '/net.ipv4.tcp_fastopen/d' \
-        -e '/net.ipv4.tcp_fin_timeout/d' \
-        -e '/net.ipv4.tcp_keepalive_time/d' \
-        -e '/net.ipv4.tcp_keepalive_probes/d' \
-        -e '/net.ipv4.tcp_keepalive_intvl/d' \
-        -e '/net.ipv4.tcp_max_orphans/d' \
-        -e '/net.ipv4.tcp_max_syn_backlog/d' \
-        -e '/net.ipv4.tcp_max_tw_buckets/d' \
-        -e '/net.ipv4.tcp_mem/d' \
-        -e '/net.ipv4.tcp_mtu_probing/d' \
-        -e '/net.ipv4.tcp_notsent_lowat/d' \
-        -e '/net.ipv4.tcp_retries2/d' \
-        -e '/net.ipv4.tcp_sack/d' \
-        -e '/net.ipv4.tcp_dsack/d' \
-        -e '/net.ipv4.tcp_slow_start_after_idle/d' \
-        -e '/net.ipv4.tcp_window_scaling/d' \
-        -e '/net.ipv4.tcp_adv_win_scale/d' \
-        -e '/net.ipv4.tcp_ecn/d' \
-        -e '/net.ipv4.tcp_ecn_fallback/d' \
-        -e '/net.ipv4.tcp_syncookies/d' \
-        -e '/net.ipv4.udp_mem/d' \
-        -e '/net.ipv6.conf.all.disable_ipv6/d' \
-        -e '/net.ipv6.conf.default.disable_ipv6/d' \
-        -e '/net.ipv6.conf.lo.disable_ipv6/d' \
-        -e '/net.unix.max_dgram_qlen/d' \
-        -e '/vm.min_free_kbytes/d' \
-        -e '/vm.swappiness/d' \
-        -e '/vm.vfs_cache_pressure/d' \
-        -e '/net.ipv4.conf.default.rp_filter/d' \
-        -e '/net.ipv4.conf.all.rp_filter/d' \
-        -e '/net.ipv4.conf.all.accept_source_route/d' \
-        -e '/net.ipv4.conf.default.accept_source_route/d' \
-        -e '/net.ipv4.neigh.default.gc_thresh1/d' \
-        -e '/net.ipv4.neigh.default.gc_thresh2/d' \
-        -e '/net.ipv4.neigh.default.gc_thresh3/d' \
-        -e '/net.ipv4.neigh.default.gc_stale_time/d' \
-        -e '/net.ipv4.conf.default.arp_announce/d' \
-        -e '/net.ipv4.conf.lo.arp_announce/d' \
-        -e '/net.ipv4.conf.all.arp_announce/d' \
-        -e '/kernel.panic/d' \
-        -e '/vm.dirty_ratio/d' \
-        -e '/vm.overcommit_memory/d' \
-        -e '/vm.overcommit_ratio/d' \
-        -e '/^#/d' \
-        -e '/^$/d' \
-        "$SYS_PATH"
+    # FIX: Use dedicated drop-in file instead of polluting /etc/sysctl.conf
+    # Backup original sysctl.conf once with timestamp, not overwrite
+    if [ -f "$SYS_PATH" ]; then
+        cp -n "$SYS_PATH" "/etc/sysctl.conf.bak.$(date +%F-%H%M%S)" 2>/dev/null || cp "$SYS_PATH" "/etc/sysctl.conf.bak"
+        green_msg "Backup of sysctl.conf created."
+    fi
 
+    # Check if BBR is available, otherwise fallback to cubic
+    TCP_CC="bbr"
+    if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+        # Try to load bbr module
+        modprobe tcp_bbr 2>/dev/null || true
+        if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
+            yellow_msg "BBR not available, falling back to cubic"
+            TCP_CC="cubic"
+        fi
+    fi
 
-    ## Add new parameters. Read More: https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf
+    # Determine if fq qdisc is available
+    QDISC="fq"
+    if [ ! -d /proc/sys/net/core/default_qdisc ]; then
+        QDISC="fq_codel"
+    fi
 
-cat <<EOF >> "$SYS_PATH"
-
-
+    # Create optimizer sysctl file (idempotent - overwrite, not append)
+    cat > "$SYS_OPTIMIZER_PATH" <<EOF
 ################################################################
+# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer (Fixed)
 ################################################################
-
-
-# /etc/sysctl.conf
-# These parameters in this file will be added/updated to the sysctl.conf file.
-# Read More: https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf
-
 
 ## File system settings
-## ----------------------------------------------------------------
-
-# Set the maximum number of open file descriptors
 fs.file-max = 67108864
 
-
 ## Network core settings
-## ----------------------------------------------------------------
-
-# Specify default queuing discipline for network devices
-net.core.default_qdisc = fq
-
-# Configure maximum network device backlog
+net.core.default_qdisc = ${QDISC}
 net.core.netdev_max_backlog = 32768
-
-# Set maximum socket receive buffer
 net.core.optmem_max = 262144
-
-# Define maximum backlog of pending connections
 net.core.somaxconn = 65536
-
-# Configure maximum TCP receive buffer size
 net.core.rmem_max = 33554432
-
-# Set default TCP receive buffer size
 net.core.rmem_default = 1048576
-
-# Configure maximum TCP send buffer size
 net.core.wmem_max = 33554432
-
-# Set default TCP send buffer size
 net.core.wmem_default = 1048576
 
-
 ## TCP settings
-## ----------------------------------------------------------------
-
-# Define socket receive buffer sizes
 net.ipv4.tcp_rmem = 16384 1048576 33554432
-
-# Specify socket send buffer sizes
 net.ipv4.tcp_wmem = 16384 1048576 33554432
-
-# Set TCP congestion control algorithm to BBR
-net.ipv4.tcp_congestion_control = bbr
-
-# Configure TCP FIN timeout period
+net.ipv4.tcp_congestion_control = ${TCP_CC}
 net.ipv4.tcp_fin_timeout = 25
-
-# Set keepalive time (seconds)
 net.ipv4.tcp_keepalive_time = 1200
-
-# Configure keepalive probes count and interval
 net.ipv4.tcp_keepalive_probes = 7
 net.ipv4.tcp_keepalive_intvl = 30
-
-# Define maximum orphaned TCP sockets
 net.ipv4.tcp_max_orphans = 819200
-
-# Set maximum TCP SYN backlog
 net.ipv4.tcp_max_syn_backlog = 20480
-
-# Configure maximum TCP Time Wait buckets
 net.ipv4.tcp_max_tw_buckets = 1440000
-
-# Define TCP memory limits
 net.ipv4.tcp_mem = 65536 1048576 33554432
-
-# Enable TCP MTU probing
 net.ipv4.tcp_mtu_probing = 1
-
-# Define minimum amount of data in the send buffer before TCP starts sending
 net.ipv4.tcp_notsent_lowat = 32768
-
-# Specify retries for TCP socket to establish connection
 net.ipv4.tcp_retries2 = 8
-
-# Enable TCP SACK and DSACK
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
-
-# Disable TCP slow start after idle
 net.ipv4.tcp_slow_start_after_idle = 0
-
-# Enable TCP window scaling
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_adv_win_scale = -2
-
-# Enable TCP ECN
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
-
-# Enable the use of TCP SYN cookies to help protect against SYN flood attacks
 net.ipv4.tcp_syncookies = 1
-
+net.ipv4.tcp_fastopen = 3
 
 ## UDP settings
-## ----------------------------------------------------------------
-
-# Define UDP memory limits
 net.ipv4.udp_mem = 65536 1048576 33554432
 
-
-## IPv6 settings
-## ----------------------------------------------------------------
-
-# Enable IPv6
-#net.ipv6.conf.all.disable_ipv6 = 0
-
-# Enable IPv6 by default
-#net.ipv6.conf.default.disable_ipv6 = 0
-
-# Enable IPv6 on the loopback interface (lo)
-#net.ipv6.conf.lo.disable_ipv6 = 0
-
-
 ## UNIX domain sockets
-## ----------------------------------------------------------------
-
-# Set maximum queue length of UNIX domain sockets
 net.unix.max_dgram_qlen = 256
 
-
-## Virtual memory (VM) settings
-## ----------------------------------------------------------------
-
-# Specify minimum free Kbytes at which VM pressure happens
+## Virtual memory settings
 vm.min_free_kbytes = 65536
-
-# Define how aggressively swap memory pages are used
 vm.swappiness = 10
-
-# Set the tendency of the kernel to reclaim memory used for caching of directory and inode objects
 vm.vfs_cache_pressure = 250
-
+vm.dirty_ratio = 20
+vm.overcommit_memory = 0
+vm.overcommit_ratio = 50
 
 ## Network Configuration
-## ----------------------------------------------------------------
-
-# Configure reverse path filtering
 net.ipv4.conf.default.rp_filter = 2
 net.ipv4.conf.all.rp_filter = 2
-
-# Disable source route acceptance
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
-
-# Neighbor table settings
 net.ipv4.neigh.default.gc_thresh1 = 512
 net.ipv4.neigh.default.gc_thresh2 = 2048
 net.ipv4.neigh.default.gc_thresh3 = 16384
 net.ipv4.neigh.default.gc_stale_time = 60
-
-# ARP settings
 net.ipv4.conf.default.arp_announce = 2
 net.ipv4.conf.lo.arp_announce = 2
 net.ipv4.conf.all.arp_announce = 2
-
-# Kernel panic timeout
 kernel.panic = 1
-
-# Set dirty page ratio for virtual memory
-vm.dirty_ratio = 20
-
-# Strictly limits memory allocation to physical RAM + swap, preventing overcommit and reducing OOM risks.
-vm.overcommit_memory = 2
-
-# Sets overcommit to 100% of RAM when enabled, but ignored here since overcommit_memory = 2 disables it.
-vm.overcommit_ratio = 100
-
-
-################################################################
-################################################################
-
 
 EOF
 
-    sudo sysctl -p
-    
-    echo 
-    green_msg 'Network is Optimized.'
-    echo 
+    # Optional: Clean old duplicated entries from /etc/sysctl.conf if script was run before with buggy version
+    # Remove our managed keys from main sysctl.conf to avoid confusion (keep custom user entries)
+    # Create backup before cleaning
+    if grep -q "99-optimizer" "$SYS_PATH" 2>/dev/null; then
+        sed -i '/99-optimizer/d' "$SYS_PATH"
+    fi
+    # Remove stale optimizer block if it exists in sysctl.conf (between markers)
+    if grep -q "File system settings" "$SYS_PATH"; then
+        yellow_msg "Cleaning old optimizer block from $SYS_PATH (now using $SYS_OPTIMIZER_PATH)"
+        # Only remove known keys to avoid deleting user comments (FIX: don't delete ^# and ^$)
+        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+            sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
+        done
+    fi
+
+    chmod 644 "$SYS_OPTIMIZER_PATH"
+
+    # Apply without errors interrupting script
+    if sysctl --system >/dev/null 2>&1; then
+        green_msg "sysctl --system applied successfully"
+    else
+        yellow_msg "sysctl --system had warnings, trying sysctl -p $SYS_OPTIMIZER_PATH"
+        sysctl -p "$SYS_OPTIMIZER_PATH" || red_msg "sysctl apply failed - check $SYS_OPTIMIZER_PATH"
+    fi
+
+    echo
+    green_msg 'Network is Optimized. Config: /etc/sysctl.d/99-optimizer.conf'
+    echo
     sleep 0.5
 }
 
-
 # Function to find the SSH port and set it in the SSH_PORT variable
 find_ssh_port() {
-    echo 
+    echo
     yellow_msg "Finding SSH port..."
-    echo 
-    
-    ## Check if the SSH configuration file exists
+    echo
+
+    SSH_PORT=""
     if [ -e "$SSH_PATH" ]; then
-        ## Use grep to search for the 'Port' directive in the SSH configuration file
-        SSH_PORT=$(grep -oP '^Port\s+\K\d+' "$SSH_PATH" 2>/dev/null)
+        # FIX: handle commented and multiple Port lines, take last active one
+        SSH_PORT=$(grep -E "^\s*Port\s+[0-9]+" "$SSH_PATH" 2>/dev/null | awk '{print $2}' | tail -n1)
+        # Also try to get from sshd -T if available (more reliable)
+        if command -v sshd >/dev/null 2>&1; then
+            detected=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | tail -n1)
+            [ -n "$detected" ] && SSH_PORT="$detected"
+        fi
 
         if [ -n "$SSH_PORT" ]; then
-            echo 
+            echo
             green_msg "SSH port found: $SSH_PORT"
-            echo 
+            echo
             sleep 0.5
         else
-            echo 
+            echo
             green_msg "SSH port is default 22."
-            echo 
+            echo
             SSH_PORT=22
             sleep 0.5
         fi
     else
-        red_msg "SSH configuration file not found at $SSH_PATH"
+        red_msg "SSH configuration file not found at $SSH_PATH, assuming 22"
+        SSH_PORT=22
     fi
 }
 
-
 # Remove old SSH config to prevent duplicates.
 remove_old_ssh_conf() {
-    ## Make a backup of the original sshd_config file
-    cp $SSH_PATH /etc/ssh/sshd_config.bak
-
-    echo 
-    yellow_msg 'Default SSH Config file Saved. Directory: /etc/ssh/sshd_config.bak'
-    echo 
+    if [ ! -f "$SSH_PATH" ]; then
+        red_msg "SSH config not found, skipping backup"
+        return 0
+    fi
+    cp "$SSH_PATH" "/etc/ssh/sshd_config.bak.$(date +%F-%H%M%S)"
+    echo
+    yellow_msg "Default SSH Config file Saved to /etc/ssh/sshd_config.bak.*"
+    echo
     sleep 1
 
-    ## Remove these lines
-    sed -i -e 's/#UseDNS yes/UseDNS no/' \
-        -e 's/#Compression no/Compression yes/' \
-        -e 's/Ciphers .*/Ciphers aes256-ctr,chacha20-poly1305@openssh.com/' \
-        -e '/MaxAuthTries/d' \
-        -e '/MaxSessions/d' \
-        -e '/TCPKeepAlive/d' \
-        -e '/ClientAliveInterval/d' \
-        -e '/ClientAliveCountMax/d' \
-        -e '/AllowAgentForwarding/d' \
-        -e '/AllowTcpForwarding/d' \
-        -e '/GatewayPorts/d' \
-        -e '/PermitTunnel/d' \
-        -e '/X11Forwarding/d' "$SSH_PATH"
+    # FIX: More robust cleaning - only remove exact directives we will re-add
+    sed -i -e 's/^\s*#\?UseDNS.*/UseDNS no/' \
+        -e 's/^\s*#\?Compression.*/Compression yes/' \
+        -e '/^\s*Ciphers.*/d' \
+        -e '/^\s*MaxAuthTries/d' \
+        -e '/^\s*MaxSessions/d' \
+        -e '/^\s*TCPKeepAlive/d' \
+        -e '/^\s*ClientAliveInterval/d' \
+        -e '/^\s*ClientAliveCountMax/d' \
+        -e '/^\s*AllowAgentForwarding/d' \
+        -e '/^\s*AllowTcpForwarding/d' \
+        -e '/^\s*GatewayPorts/d' \
+        -e '/^\s*PermitTunnel/d' \
+        -e '/^\s*X11Forwarding/d' "$SSH_PATH"
 
+    # Ensure Ciphers line is set correctly (only once)
+    if ! grep -q "^Ciphers" "$SSH_PATH"; then
+        echo "Ciphers aes256-ctr,chacha20-poly1305@openssh.com" >> "$SSH_PATH"
+    fi
 }
-# Update SSH config
+
+# Update SSH config - FIXED: reasonable keepalive, secure defaults
 update_sshd_conf() {
-    echo 
+    echo
     yellow_msg 'Optimizing SSH...'
-    echo 
+    echo
     sleep 0.5
 
-    ## Enable TCP keep-alive messages
-    echo "TCPKeepAlive yes" | tee -a "$SSH_PATH"
+    # FIX: Reasonable keepalive (was 3000/100 = 83h timeout, unreasonable)
+    # 300s interval * 3 probes = 15min idle timeout, standard hardening
+    # FIX: Security-sensitive options disabled by default (was yes, insecure)
+    # Only TCPKeepAlive yes is kept; forwarding/tunneling/X11 disabled
 
-    ## Configure client keep-alive messages
-    echo "ClientAliveInterval 3000" | tee -a "$SSH_PATH"
-    echo "ClientAliveCountMax 100" | tee -a "$SSH_PATH"
+    # Helper to set or replace a directive idempotently
+    set_sshd_opt() {
+        local key="$1" val="$2"
+        if grep -qE "^[[:space:]]*${key}[[:space:]]+" "$SSH_PATH"; then
+            sed -i -E "s|^[[:space:]]*${key}[[:space:]]+.*|${key} ${val}|" "$SSH_PATH"
+        else
+            echo "${key} ${val}" >> "$SSH_PATH"
+        fi
+    }
 
-    ## Allow TCP forwarding
-    echo "AllowTcpForwarding yes" | tee -a "$SSH_PATH"
+    set_sshd_opt "TCPKeepAlive" "yes"
+    set_sshd_opt "ClientAliveInterval" "300"
+    set_sshd_opt "ClientAliveCountMax" "3"
+    # Security: disable forwarding/tunneling by default - user can enable manually if needed
+    set_sshd_opt "AllowTcpForwarding" "no"
+    set_sshd_opt "GatewayPorts" "no"
+    set_sshd_opt "PermitTunnel" "no"
+    set_sshd_opt "X11Forwarding" "no"
+    set_sshd_opt "AllowAgentForwarding" "no"
 
-    ## Enable gateway ports
-    echo "GatewayPorts yes" | tee -a "$SSH_PATH"
-
-    ## Enable tunneling
-    echo "PermitTunnel yes" | tee -a "$SSH_PATH"
-
-    ## Enable X11 graphical interface forwarding
-    echo "X11Forwarding yes" | tee -a "$SSH_PATH"
-
-    ## Restart the SSH service to apply the changes
-    sudo systemctl restart ssh
-
-    echo 
-    green_msg 'SSH is Optimized.'
-    echo 
+    # FIX: Validate config before restart
+    if sshd -t 2>/dev/null; then
+        if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
+            green_msg 'SSH is Optimized.'
+        else
+            red_msg 'SSH config test passed but restart failed - try manually: systemctl restart ssh'
+        fi
+    else
+        red_msg 'sshd -t failed - NOT restarting SSH to avoid lockout. Check /etc/ssh/sshd_config'
+        sshd -t
+    fi
+    echo
     sleep 0.5
 }
 
-
-# System Limits Optimizations
+# System Limits Optimizations - FIXED
 limits_optimizations() {
     echo
     yellow_msg 'Optimizing System Limits...'
-    echo 
+    echo
     sleep 0.5
 
-    ## Clear old ulimits
-    sed -i '/ulimit -c/d' $PROF_PATH
-    sed -i '/ulimit -d/d' $PROF_PATH
-    sed -i '/ulimit -f/d' $PROF_PATH
-    sed -i '/ulimit -i/d' $PROF_PATH
-    sed -i '/ulimit -l/d' $PROF_PATH
-    sed -i '/ulimit -m/d' $PROF_PATH
-    sed -i '/ulimit -n/d' $PROF_PATH
-    sed -i '/ulimit -q/d' $PROF_PATH
-    sed -i '/ulimit -s/d' $PROF_PATH
-    sed -i '/ulimit -t/d' $PROF_PATH
-    sed -i '/ulimit -u/d' $PROF_PATH
-    sed -i '/ulimit -v/d' $PROF_PATH
-    sed -i '/ulimit -x/d' $PROF_PATH
-    sed -i '/ulimit -s/d' $PROF_PATH
+    # FIX: Don't pollute /etc/profile with ulimit. Use limits.d and systemd.
+    # FIX: Only clean ulimit lines added by previous buggy optimizer, preserve user custom entries
+    # Old code used '/^ulimit/d' and '/ulimit -[cdef...]/d' which deleted ANY user ulimit
+    # Now we only delete the exact 14 lines the buggy script added (specific values)
+    optimizer_ulimits=(
+        "ulimit -c unlimited"
+        "ulimit -d unlimited"
+        "ulimit -f unlimited"
+        "ulimit -i unlimited"
+        "ulimit -l unlimited"
+        "ulimit -m unlimited"
+        "ulimit -n 1048576"
+        "ulimit -q unlimited"
+        "ulimit -s -H 65536"
+        "ulimit -s 32768"
+        "ulimit -t unlimited"
+        "ulimit -u unlimited"
+        "ulimit -v unlimited"
+        "ulimit -x unlimited"
+    )
+    found_optimizer_entry=false
+    for entry in "${optimizer_ulimits[@]}"; do
+        if grep -qF "$entry" "$PROF_PATH" 2>/dev/null; then
+            found_optimizer_entry=true
+            break
+        fi
+    done
+    if [ "$found_optimizer_entry" = true ]; then
+        yellow_msg "Cleaning old optimizer ulimit entries from $PROF_PATH (preserving custom user entries)"
+        cp "$PROF_PATH" "/etc/profile.bak.$(date +%F-%H%M%S)"
+        # FIX: Use exact-match filtering with whitespace trimming to avoid deleting user custom values
+        # e.g., user has "ulimit -n 65535" should be kept, only "ulimit -n 1048576" removed
+        tmp_prof="${PROF_PATH}.tmp.$$"
+        : > "$tmp_prof"
+        while IFS= read -r line || [ -n "$line" ]; do
+            trimmed=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            skip=false
+            for entry in "${optimizer_ulimits[@]}"; do
+                if [ "$trimmed" = "$entry" ]; then
+                    skip=true
+                    break
+                fi
+            done
+            if [ "$skip" = false ]; then
+                printf '%s\n' "$line" >> "$tmp_prof"
+            else
+                yellow_msg "Removed optimizer entry: $trimmed"
+            fi
+        done < "$PROF_PATH"
+        mv "$tmp_prof" "$PROF_PATH"
+    else
+        yellow_msg "No optimizer ulimit entries found in $PROF_PATH, leaving custom entries untouched"
+    fi
 
+    # Create limits.d config (proper way)
+    cat > "$LIMITS_CONF" <<'EOF'
+# /etc/security/limits.d/99-optimizer.conf - Fixed
+*               soft    nofile          1048576
+*               hard    nofile          1048576
+root            soft    nofile          1048576
+root            hard    nofile          1048576
+*               soft    nproc           unlimited
+*               hard    nproc           unlimited
+*               soft    memlock         unlimited
+*               hard    memlock         unlimited
+*               soft    core            unlimited
+*               hard    core            unlimited
+*               soft    stack           32768
+*               hard    stack           65536
+EOF
+    chmod 644 "$LIMITS_CONF"
 
-    ## Add new ulimits
-    ## The maximum size of core files created.
-    echo "ulimit -c unlimited" | tee -a $PROF_PATH
+    # FIX: Also tune systemd defaults (system-wide)
+    # Backup and set in /etc/systemd/system.conf and user.conf if needed
+    for conf in /etc/systemd/system.conf /etc/systemd/user.conf; do
+        if [ -f "$conf" ]; then
+            # Only set if not already tuned
+            if ! grep -q "DefaultLimitNOFILE=1048576" "$conf"; then
+                cp "$conf" "${conf}.bak.$(date +%F-%H%M%S)" 2>/dev/null || true
+                # Remove old DefaultLimit entries to avoid duplicates
+                sed -i '/^DefaultLimitNOFILE/d' "$conf"
+                sed -i '/^DefaultLimitNPROC/d' "$conf"
+                sed -i '/^DefaultLimitMEMLOCK/d' "$conf"
+                {
+                    echo "DefaultLimitNOFILE=1048576"
+                    echo "DefaultLimitNPROC=infinity"
+                    echo "DefaultLimitMEMLOCK=infinity"
+                } >> "$conf"
+            fi
+        fi
+    done
 
-    ## The maximum size of a process's data segment
-    echo "ulimit -d unlimited" | tee -a $PROF_PATH
+    # Ensure pam_limits is enabled
+    if [ -f /etc/pam.d/common-session ] && ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
+        echo "session required pam_limits.so" >> /etc/pam.d/common-session
+    fi
 
-    ## The maximum size of files created by the shell (default option)
-    echo "ulimit -f unlimited" | tee -a $PROF_PATH
+    # Apply for current session (best effort)
+    ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
 
-    ## The maximum number of pending signals
-    echo "ulimit -i unlimited" | tee -a $PROF_PATH
+    # Reload systemd if available
+    systemctl daemon-reload 2>/dev/null || true
 
-    ## The maximum size that may be locked into memory
-    echo "ulimit -l unlimited" | tee -a $PROF_PATH
-
-    ## The maximum memory size
-    echo "ulimit -m unlimited" | tee -a $PROF_PATH
-
-    ## The maximum number of open file descriptors
-    echo "ulimit -n 1048576" | tee -a $PROF_PATH
-
-    ## The maximum POSIX message queue size
-    echo "ulimit -q unlimited" | tee -a $PROF_PATH
-
-    ## The maximum stack size
-    echo "ulimit -s -H 65536" | tee -a $PROF_PATH
-    echo "ulimit -s 32768" | tee -a $PROF_PATH
-
-    ## The maximum number of seconds to be used by each process.
-    echo "ulimit -t unlimited" | tee -a $PROF_PATH
-
-    ## The maximum number of processes available to a single user
-    echo "ulimit -u unlimited" | tee -a $PROF_PATH
-
-    ## The maximum amount of virtual memory available to the process
-    echo "ulimit -v unlimited" | tee -a $PROF_PATH
-
-    ## The maximum number of file locks
-    echo "ulimit -x unlimited" | tee -a $PROF_PATH
-
-
-    echo 
-    green_msg 'System Limits are Optimized.'
-    echo 
+    echo
+    green_msg 'System Limits are Optimized. Config: /etc/security/limits.d/99-optimizer.conf (re-login required)'
+    echo
     sleep 0.5
 }
 
-
-# UFW Optimizations
+# UFW Optimizations - FIXED (removed UDP, fixed SSH_PORT handling, idempotent)
 ufw_optimizations() {
     echo
     yellow_msg 'Installing & Optimizing UFW...'
-    echo 
-    sleep 0.5
-
-    ## Purge firewalld to install UFW.
-    sudo apt -y purge firewalld
-    
-    ## Install UFW if it isn't installed.
-    sudo apt update -q
-    sudo apt install -y ufw
-
-    ## Disable UFW
-    sudo ufw disable
-
-    ## Open default ports.
-    sudo ufw allow $SSH_PORT
-    sudo ufw allow 80/tcp
-    sudo ufw allow 80/udp
-    sudo ufw allow 443/tcp
-    sudo ufw allow 443/udp
-    sleep 0.5
-
-    ## Change the UFW config to use System config.
-    sed -i 's+/etc/ufw/sysctl.conf+/etc/sysctl.conf+gI' /etc/default/ufw
-
-    ## Enable & Reload
-    echo "y" | sudo ufw enable
-    sudo ufw reload
-    echo 
-    green_msg 'UFW is Installed & Optimized. (Open your custom ports manually.)'
-    echo 
-    sleep 0.5
-}
-
-
-# Show the Menu
-show_menu() {
-    echo 
-    yellow_msg 'Choose One Option: '
-    echo 
-    green_msg '1  - Apply Everything + XanMod Kernel. (RECOMMENDED)'
     echo
-    green_msg '2  - Install XanMod Kernel.'
-    echo 
-    green_msg '3  - Complete Update + Useful Packages + Make SWAP + Optimize Network, SSH & System Limits + UFW'
-    green_msg '4  - Complete Update + Make SWAP + Optimize Network, SSH & System Limits + UFW'
-    green_msg '5  - Complete Update + Make SWAP + Optimize Network, SSH & System Limits'
-    echo 
-    green_msg '6  - Complete Update & Clean the OS.'
-    green_msg '7  - Install Useful Packages.'
-    green_msg '8  - Make SWAP (2Gb).'
-    green_msg '9  - Optimize the Network, SSH & System Limits.'
-    echo 
-    green_msg '10 - Optimize the Network settings.'
-    green_msg '11 - Optimize the SSH settings.'
-    green_msg '12 - Optimize the System Limits.'
-    echo 
-    green_msg '13 - Install & Optimize UFW.'
-    echo 
-    red_msg 'q - Exit.'
-    echo 
+    sleep 0.5
+
+    # FIX: Don't purge firewalld blindly - only if exists and not needed
+    if dpkg -l | grep -q firewalld 2>/dev/null; then
+        yellow_msg "firewalld detected, purging to avoid conflict with UFW..."
+        apt -y purge firewalld 2>/dev/null || true
+    fi
+
+    apt -q update
+    apt install -y ufw 2>/dev/null || {
+        red_msg "UFW install failed"
+        return 1
+    }
+
+    # Ensure SSH_PORT is set
+    if [ -z "$SSH_PORT" ]; then
+        find_ssh_port
+    fi
+    # Validate SSH_PORT is numeric
+    if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
+        red_msg "Invalid SSH port detected: $SSH_PORT, defaulting to 22"
+        SSH_PORT=22
+    fi
+
+    # Disable UFW temporarily to configure
+    ufw --force disable 2>/dev/null || true
+
+    # FIX: Reset to avoid duplicate rules on re-run (optional but cleaner)
+    # ufw --force reset 2>/dev/null || true
+
+    # FIX: Only allow TCP - REMOVED UDP per request
+    # Delete existing rules for SSH to avoid duplicates
+    ufw delete allow "$SSH_PORT" 2>/dev/null || true
+    ufw delete allow "$SSH_PORT/tcp" 2>/dev/null || true
+
+    ufw allow "$SSH_PORT/tcp" comment 'SSH' 2>/dev/null || ufw allow "$SSH_PORT"
+    ufw allow 80/tcp comment 'HTTP' 2>/dev/null || ufw allow 80/tcp
+    ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || ufw allow 443/tcp
+
+    # Ensure we didn't leave UDP rules from previous buggy run - delete them
+    ufw delete allow 80/udp 2>/dev/null || true
+    ufw delete allow 443/udp 2>/dev/null || true
+    # Also delete generic 80,443 without proto if they imply both
+    # (ufw allow 80 without /tcp allows both - so we clean and re-add only tcp)
+
+    sleep 0.5
+
+    # FIX: Don't blindly sed /etc/default/ufw - check if needed
+    # The original: s+/etc/ufw/sysctl.conf+/etc/sysctl.conf+gI breaks UFW's sysctl handling
+    # Better to leave UFW default or ensure it points to optimizer file
+    if grep -q "/etc/ufw/sysctl.conf" /etc/default/ufw 2>/dev/null; then
+        yellow_msg "Leaving /etc/default/ufw sysctl path as default (UFW will use /etc/ufw/sysctl.conf, system uses /etc/sysctl.d/99-optimizer.conf)"
+        # Not changing it - original sed was harmful
+    fi
+
+    # Set default policies if not set (safe defaults)
+    ufw default deny incoming 2>/dev/null || true
+    ufw default allow outgoing 2>/dev/null || true
+
+    # Enable & Reload - non-interactive
+    echo "y" | ufw --force enable 2>/dev/null || ufw --force enable
+    ufw reload 2>/dev/null || true
+
+    # Show status
+    ufw status verbose 2>/dev/null || ufw status
+
+    echo
+    green_msg 'UFW is Installed & Optimized. (Only TCP 80,443 + SSH:'"$SSH_PORT"'/tcp opened. UDP removed.)'
+    echo
+    sleep 0.5
 }
 
+# Show the Menu - FIXED (removed XanMod)
+show_menu() {
+    echo
+    yellow_msg 'Choose One Option: '
+    echo
+    green_msg '1  - Apply Everything (Update + Packages + SWAP + Network + SSH + Limits + UFW) (RECOMMENDED)'
+    echo
+    green_msg '2  - Complete Update + Useful Packages + Make SWAP + Optimize Network, SSH & System Limits + UFW'
+    green_msg '3  - Complete Update + Make SWAP + Optimize Network, SSH & System Limits + UFW'
+    green_msg '4  - Complete Update + Make SWAP + Optimize Network, SSH & System Limits'
+    echo
+    green_msg '5  - Complete Update & Clean the OS.'
+    green_msg '6  - Install Useful Packages.'
+    green_msg '7  - Make SWAP (2Gb).'
+    green_msg '8  - Optimize the Network, SSH & System Limits.'
+    echo
+    green_msg '9  - Optimize the Network settings.'
+    green_msg '10 - Optimize the SSH settings.'
+    green_msg '11 - Optimize the System Limits.'
+    echo
+    green_msg '12 - Install & Optimize UFW (TCP only).'
+    echo
+    red_msg 'q - Exit.'
+    echo
+}
 
 # Choosing Program
 main() {
     while true; do
         show_menu
-        read -p 'Enter Your Choice: ' choice
+        read -rp 'Enter Your Choice: ' choice
         case $choice in
         1)
             apply_everything
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
-
         2)
             complete_update
             sleep 0.5
-
-            install_xanmod
+            installations
+            enable_packages
             sleep 0.5
-
-            echo 
+            swap_maker
+            sleep 0.5
+            sysctl_optimizations
+            sleep 0.5
+            remove_old_ssh_conf
+            sleep 0.5
+            update_sshd_conf
+            sleep 0.5
+            limits_optimizations
+            sleep 0.5
+            find_ssh_port
+            ufw_optimizations
+            sleep 0.5
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
         3)
             complete_update
             sleep 0.5
-
-            installations
-            enable_packages
-            sleep 0.5
-
             swap_maker
             sleep 0.5
-
             sysctl_optimizations
             sleep 0.5
-
             remove_old_ssh_conf
             sleep 0.5
-
             update_sshd_conf
             sleep 0.5
-
             limits_optimizations
             sleep 0.5
-
             find_ssh_port
             ufw_optimizations
             sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
         4)
             complete_update
             sleep 0.5
-
             swap_maker
             sleep 0.5
-
             sysctl_optimizations
             sleep 0.5
-
             remove_old_ssh_conf
             sleep 0.5
-
             update_sshd_conf
             sleep 0.5
-
             limits_optimizations
             sleep 0.5
-
-            find_ssh_port
-            ufw_optimizations
-            sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
         5)
             complete_update
             sleep 0.5
-
-            swap_maker
-            sleep 0.5
-
-            sysctl_optimizations
-            sleep 0.5
-
-            remove_old_ssh_conf
-            sleep 0.5
-
-            update_sshd_conf
-            sleep 0.5
-
-            limits_optimizations
-            sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
         6)
             complete_update
             sleep 0.5
-
-            echo 
-            green_msg '========================='
-            green_msg  'Done.'
-            green_msg '========================='
-
-            ask_reboot
-            ;;
-            
-        7)
-            complete_update
-            sleep 0.5
-
             installations
             enable_packages
             sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
+            ask_reboot
+            ;;
+        7)
+            swap_maker
+            sleep 0.5
+            echo
+            green_msg '========================='
+            green_msg  'Done.'
+            green_msg '========================='
             ask_reboot
             ;;
         8)
-            swap_maker
+            sysctl_optimizations
             sleep 0.5
-
-            echo 
+            remove_old_ssh_conf
+            sleep 0.5
+            update_sshd_conf
+            sleep 0.5
+            limits_optimizations
+            sleep 0.5
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
         9)
             sysctl_optimizations
             sleep 0.5
-
-            remove_old_ssh_conf
-            sleep 0.5
-
-            update_sshd_conf
-            sleep 0.5
-
-            limits_optimizations
-            sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
-            ask_reboot
             ;;
         10)
-            sysctl_optimizations
-            sleep 0.5
-
-            echo 
-            green_msg '========================='
-            green_msg  'Done.'
-            green_msg '========================='
-
-            ;;
-        11)
             remove_old_ssh_conf
             sleep 0.5
-
             update_sshd_conf
             sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ;;
-        12)
+        11)
             limits_optimizations
             sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ask_reboot
             ;;
-        13)
+        12)
             find_ssh_port
             ufw_optimizations
             sleep 0.5
-
-            echo 
+            echo
             green_msg '========================='
             green_msg  'Done.'
             green_msg '========================='
-
             ;;
-        q)
+        q|Q)
             exit 0
             ;;
-
         *)
             red_msg 'Wrong input!'
             ;;
@@ -1000,42 +909,28 @@ main() {
     done
 }
 
-
-# Apply Everything
+# Apply Everything - FIXED (no XanMod)
 apply_everything() {
-
     complete_update
     sleep 0.5
-
     disable_terminal_ads
     sleep 0.5
-
-    install_xanmod
-    sleep 0.5 
-
     installations
     enable_packages
     sleep 0.5
-
     swap_maker
     sleep 0.5
-
     sysctl_optimizations
     sleep 0.5
-
     remove_old_ssh_conf
     sleep 0.5
-
     update_sshd_conf
     sleep 0.5
-
     limits_optimizations
     sleep 0.5
-    
     find_ssh_port
     ufw_optimizations
     sleep 0.5
 }
-
 
 main
