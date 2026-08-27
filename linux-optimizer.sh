@@ -142,12 +142,16 @@ NM_APPLIED=0
 NM_DNSNONE_DROPIN="/etc/NetworkManager/conf.d/99-linux-optimizer-dnsnone.conf"
 NM_DNSNONE_CREATED=0
 
-# ---- Persistence (networkd-dispatcher) ----
+# ---- Persistence (networkd-dispatcher + netplan) ----
 DNS_STATE_DIR="/var/lib/linux-optimizer"
 DNS_STATE_FILE="$DNS_STATE_DIR/dns.env"
 NETWORKD_DISPATCHER_HOOK="/etc/networkd-dispatcher/routable.d/70-linux-optimizer-dns"
 DNS_STATE_WRITTEN=0
 DNS_HOOK_CREATED=0
+
+NETPLAN_DNS_FILE="/etc/netplan/99-linux-optimizer-dns.yaml"
+NETPLAN_FILE_CREATED=0
+NETPLAN_APPLIED=0
 
 # ---- DNS database ---------------------------------------------------
 # Format: "IPv4_servers|IPv6_servers|DoT_pairs"
@@ -266,7 +270,7 @@ read_validated_dns() {
 }
 
 build_resolved_dns_value() {
-    # build_resolved_dns_value <DoT pairs> <servers>  → "ip[#sni] ..." list
+    # build_resolved_dns_value <DoT pairs> <servers>  -> "ip[#sni] ..." list
     local pairs="$1" ip sni p out=""
     for ip in $2; do
         sni=""
@@ -508,7 +512,7 @@ ensure_resolved_stub() {
 override_link_dns_runtime() {
     # Best-effort runtime override of per-link (DHCP) DNS servers.
     # NOTE: non-persistent; persistent override is done via NetworkManager
-    # profiles, or requires networkd/netplan configuration (not touched here).
+    # profiles, netplan file, or the networkd-dispatcher hook.
     command -v resolvectl >/dev/null 2>&1 || return 0
     resolvectl flush-caches >/dev/null 2>&1 || true
     local link
@@ -571,6 +575,87 @@ EOF
         else
             yellow_msg "networkd-dispatcher unavailable; DNS override may not survive reboot/renew."
         fi
+    fi
+    return 0
+}
+
+configure_netplan_dns() {
+    # Persistent link-level fix for netplan+networkd systems:
+    # stops DHCP/provider DNS (use-dns: false) and pins the selected servers.
+    # Only touches interfaces netplan actually owns (never creates new NIC config).
+    command -v netplan >/dev/null 2>&1 || return 0
+    networkd_active || return 0
+    [ -d /etc/netplan ] || return 0
+
+    if grep -rqsE 'renderer:[[:space:]]*NetworkManager' /etc/netplan /run/netplan /usr/lib/netplan 2>/dev/null; then
+        return 0
+    fi
+
+    local -a links=() skip=()
+    local l
+    while read -r l; do
+        [ -z "$l" ] || [ "$l" = "lo" ] && continue
+        if ls /run/systemd/network/ 2>/dev/null | grep -qE "^[0-9]+-netplan-${l}\.network$"; then
+            links+=("$l")
+        else
+            skip+=("$l")
+        fi
+    done < <(resolvectl status 2>/dev/null | awk '/^Link [0-9]+ \(/ {gsub(/[()]/,"",$3); sub(/:$/,"",$3); print $3}')
+
+    [ "${#skip[@]}" -gt 0 ] && yellow_msg "Not netplan-managed (runtime override + hook remain for them): ${skip[*]}"
+    [ "${#links[@]}" -gt 0 ] || return 0
+
+    local body="" i ip
+    for i in "${links[@]}"; do
+        body+="    ${i}:"$'\n'
+        body+="      dhcp4-overrides:"$'\n'"        use-dns: false"$'\n'
+        body+="      dhcp6-overrides:"$'\n'"        use-dns: false"$'\n'
+        if [ -n "$DNS_V4" ] || [ -n "$DNS_V6" ]; then
+            body+="      nameservers:"$'\n'"        addresses:"$'\n'
+            for ip in $DNS_V4 $DNS_V6; do
+                body+="          - $ip"$'\n'
+            done
+        fi
+    done
+    body=${body%$'\n'}
+
+    local new_content="network:"$'\n'"  version: 2"$'\n'"  ethernets:"$'\n'"$body"
+
+    if [ -f "$NETPLAN_DNS_FILE" ] && [ "$(cat "$NETPLAN_DNS_FILE" 2>/dev/null)" = "$new_content" ]; then
+        green_msg "Netplan DNS override already up to date."
+        return 0
+    fi
+
+    [ -f "$NETPLAN_DNS_FILE" ] && cp "$NETPLAN_DNS_FILE" "${NETPLAN_DNS_FILE}.bak.$TS"
+
+    printf '%s\n' "$new_content" > "$NETPLAN_DNS_FILE" || { red_msg "Failed to write $NETPLAN_DNS_FILE"; return 1; }
+    chmod 600 "$NETPLAN_DNS_FILE"
+    NETPLAN_FILE_CREATED=1
+
+    # Validate BEFORE touching anything live
+    if ! netplan generate >/dev/null 2>&1; then
+        red_msg "netplan validation failed - reverting our netplan file."
+        if [ -f "${NETPLAN_DNS_FILE}.bak.$TS" ]; then
+            mv "${NETPLAN_DNS_FILE}.bak.$TS" "$NETPLAN_DNS_FILE"
+        else
+            rm -f "$NETPLAN_DNS_FILE"
+        fi
+        NETPLAN_FILE_CREATED=0
+        return 0
+    fi
+    green_msg "Netplan override written + validated: $NETPLAN_DNS_FILE"
+
+    local ans
+    read -r -p "[*] Apply netplan now? (brief link reconfiguration) [y/N]: " ans </dev/tty
+    if [[ "$ans" =~ ^[Yy]$ ]]; then
+        if netplan apply; then
+            NETPLAN_APPLIED=1
+            green_msg "netplan applied - DHCP/provider DNS disabled on: ${links[*]}"
+        else
+            red_msg "netplan apply failed - override activates on next reboot instead."
+        fi
+    else
+        yellow_msg "Live apply skipped - override activates on next reboot."
     fi
     return 0
 }
@@ -648,8 +733,9 @@ apply_dns_systemd_resolved() {
         nm_apply_dns_to_profiles
     fi
 
-        override_link_dns_runtime "$dns_value"
+    override_link_dns_runtime "$dns_value"
     persist_dns_state
+    configure_netplan_dns
     return 0
 }
 
@@ -863,6 +949,17 @@ rollback_dns() {
         rm -f "$DNS_STATE_FILE"
         green_msg "Persisted DNS state removed."
     fi
+    if [ "$NETPLAN_FILE_CREATED" = "1" ] || [ "$NETPLAN_APPLIED" = "1" ]; then
+        if [ -f "${NETPLAN_DNS_FILE}.bak.$TS" ]; then
+            mv "${NETPLAN_DNS_FILE}.bak.$TS" "$NETPLAN_DNS_FILE"
+        else
+            rm -f "$NETPLAN_DNS_FILE"
+        fi
+        if [ "$NETPLAN_APPLIED" = "1" ]; then
+            netplan apply >/dev/null 2>&1 || true
+        fi
+        green_msg "Netplan DNS override removed."
+    fi
 
     if [ "$RESOLVED_DROPIN_WRITTEN" = "1" ]; then
         if [ "$RESOLVED_DROPIN_EXISTED" = "1" ] && [ -f "${RESOLVED_DROPIN}.bak.$TS" ]; then
@@ -1073,6 +1170,15 @@ run_distro_optimizer() {
         red_msg "Downloaded script failed the syntax check. Aborting for safety."
         exit 1
     fi
+
+    # Pre-create the sshd privilege-separation runtime dir so `sshd -t` inside
+    # the distro optimizer does not fail with the false positive:
+    # "Missing privilege separation directory: /run/sshd"
+    mkdir -p /run/sshd && chmod 0755 /run/sshd
+    if [ ! -f /usr/lib/tmpfiles.d/sshd.conf ]; then
+        echo 'd /run/sshd 0755 root root -' > /usr/lib/tmpfiles.d/sshd.conf
+    fi
+
     bash "$file"
 }
 
