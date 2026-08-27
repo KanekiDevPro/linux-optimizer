@@ -877,45 +877,23 @@ set_timezone() {
     yellow_msg 'Setting TimeZone based on VPS IP address...'
     sleep 0.5
 
-    get_location_info() {
-        local ip_sources=("https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ipv4.ident.me/")
-        local location_info
+    local ip tz src
+    ip=""
+    for src in "https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ipv4.ident.me/"; do
+        ip=$(curl -s --max-time 10 "$src")
+        [ -n "$ip" ] && break
+    done
+    [ -z "$ip" ] && { red_msg "Could not detect public IP. Setting timezone to UTC."; timedatectl set-timezone "UTC"; echo; return 1; }
 
-        for source in "${ip_sources[@]}"; do
-            local ip=$(curl -s "$source")
-            if [ -n "$ip" ]; then
-                location_info=$(curl -s "http://ip-api.com/json/$ip")
-                if [ -n "$location_info" ]; then
-                    echo "$location_info"
-                    return 0
-                fi
-            fi
-        done
+    tz=$(curl -s --max-time 10 "http://ip-api.com/json/$ip" | jq -r '.timezone // empty' 2>/dev/null)
 
-        red_msg "Error: Failed to fetch location information from known sources. Setting timezone to UTC."
-        sudo timedatectl set-timezone "UTC"
-        return 1
-    }
-
-    # Fetch location information from three sources
-    location_info_1=$(get_location_info)
-    location_info_2=$(get_location_info)
-    location_info_3=$(get_location_info)
-
-    # Extract timezones from the location information
-    timezones=($(echo "$location_info_1 $location_info_2 $location_info_3" | jq -r '.timezone'))
-
-    # Check if at least two timezones are equal
-    if [[ "${timezones[0]}" == "${timezones[1]}" || "${timezones[0]}" == "${timezones[2]}" || "${timezones[1]}" == "${timezones[2]}" ]]; then
-        # Set the timezone based on the first matching pair
-        timezone="${timezones[0]}"
-        sudo timedatectl set-timezone "$timezone"
-        green_msg "Timezone set to $timezone"
+    # Only apply if the timezone actually exists on this system
+    if [ -n "$tz" ] && timedatectl list-timezones 2>/dev/null | grep -Fxq "$tz"; then
+        timedatectl set-timezone "$tz" && green_msg "Timezone set to $tz"
     else
-        red_msg "Error: Failed to fetch consistent location information from known sources. Setting timezone to UTC."
-        sudo timedatectl set-timezone "UTC"
+        red_msg "Could not determine a valid timezone. Setting timezone to UTC."
+        timedatectl set-timezone "UTC"
     fi
-
     echo
     sleep 0.5
 }
