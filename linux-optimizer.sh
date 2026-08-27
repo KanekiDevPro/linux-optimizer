@@ -855,7 +855,7 @@ rollback_dns() {
         done
     fi
 
-        if [ "$DNS_HOOK_CREATED" = "1" ]; then
+    if [ "$DNS_HOOK_CREATED" = "1" ]; then
         rm -f "$NETWORKD_DISPATCHER_HOOK"
         green_msg "networkd-dispatcher hook removed."
     fi
