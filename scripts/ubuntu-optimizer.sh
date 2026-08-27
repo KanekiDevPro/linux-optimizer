@@ -1,6 +1,4 @@
 #!/bin/bash
-# https://github.com/hawshemi/Linux-Optimizer
-
 
 # Green, Yellow & Red Messages.
 green_msg() {
@@ -333,7 +331,7 @@ sysctl_optimizations() {
         "$SYS_PATH"
 
 
-    ## Add new parameters. Read More: https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf
+    ## Add new parameters. Read More: https://github.com/KanekiDevPro/Linux-Optimizer/blob/main/files/sysctl.conf
 
 cat <<EOF >> "$SYS_PATH"
 
@@ -344,7 +342,7 @@ cat <<EOF >> "$SYS_PATH"
 
 # /etc/sysctl.conf
 # These parameters in this file will be added/updated to the sysctl.conf file.
-# Read More: https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf
+# Read More: https://github.com/KanekiDevPro/Linux-Optimizer/blob/main/files/sysctl.conf
 
 
 ## File system settings
