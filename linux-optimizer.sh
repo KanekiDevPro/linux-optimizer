@@ -1,16 +1,4 @@
 #!/usr/bin/env bash
-# Linux Optimizer Bootstrap — Secure, Idempotent, Reversible
-# Source: https://github.com/KanekiDevPro/linux-optimizer
-# Pinned ref: c3f1f819628f0cd63319d7b94c51b3945555561a (commit SHA, 2026-08-27)
-# Verified SHA256 (computed from https://raw.githubusercontent.com/.../<REF>/scripts/*):
-#   ubuntu-optimizer.sh  = 56423a1017c791be54f98e7a90d897166b0760af45f3f3d25a2b843ca9da78a1
-#   debian-optimizer.sh  = 34b18177213e4fbe622933c3813ffd04aae661921ca1061918d5eedc906fd4f2
-#   centos-optimizer.sh  = 23a73c7bf2783afaccc889ce77467c1b40edef9b576427c341014528a50d8c26 (also for almalinux)
-#   fedora-optimizer.sh  = f9f8032f97e381be1d1d1d2bc07e04923ca946d0fc7a931fe76a7e2751bc4a79
-# Regenerate: sha256sum <file> after verifying GPG tag/commit signature at GitHub release page.
-# Banner supported: Ubuntu 20.04/22.04/24.04, Debian 11/12, CentOS Stream 8/9, AlmaLinux 8/9, Fedora 37+ (see OS validation below)
-# Usage: sudo bash linux-optimizer-bootstrap-secure.sh [--dry-run] [--yes] [--with-dns] [--with-timezone] [--timezone TZ] [--help]
-
 set -Eeuo pipefail
 IFS=$'\n\t'
 
