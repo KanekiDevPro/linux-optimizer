@@ -46,7 +46,9 @@ This script safely applies a set of best-practice system tweaks:
    ```bash
    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh
 
-   What the Script Does
+
+What the Script Does
+
 1. System Update & Cleanup
 Runs apt update, apt upgrade, apt full-upgrade, apt autoremove, apt autoclean, and apt clean.
 
