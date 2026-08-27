@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-# https://github.com/hawshemi/Linux-Optimizer - FIXED VERSION
-# Fixes: removed XanMod, fixed swap_maker, sysctl_optimizations, limits_optimizations, ufw_optimizations, removed UDP ports
-# Additional Fixes: reasonable SSH keepalive (300/3), disabled insecure forwarding by default, removed numfmt dep, per-package installs, preserve custom ulimit, fixed df filesystem
 
 set -o pipefail
 
