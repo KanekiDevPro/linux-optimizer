@@ -944,6 +944,12 @@ else
     sleep 2
 fi
 
+if [ "$OS" = "unknown" ]; then
+    echo
+    red_msg "Unsupported OS. Nothing has been changed. Exiting."
+    echo
+    exit 1
+fi
 
 ## Run
 
