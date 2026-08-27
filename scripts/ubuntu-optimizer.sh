@@ -53,7 +53,7 @@ PROF_PATH="/etc/profile"
 SSH_PORT=""
 SSH_PATH="/etc/ssh/sshd_config"
 SWAP_PATH="/swapfile"
-SWAP_SIZE=2G
+SWAP_SIZE=2G  ## Deprecated: sized adaptively in swap_maker
 
 
 # Root
@@ -72,7 +72,21 @@ check_if_running_as_root() {
 # Check Root
 check_if_running_as_root
 sleep 0.5
+detect_resources
+sleep 0.5
 
+
+# Detect hardware resources for adaptive tuning (runs once per invocation).
+detect_resources() {
+    RAM_KB=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+    case "$RAM_KB" in ''|*[!0-9]*) RAM_KB=2097152 ;; esac   ## Fallback: assume 2G
+    RAM_MB=$((RAM_KB / 1024))
+    RAM_GB=$(( (RAM_MB + 1023) / 1024 ))
+    CPU_COUNT=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null)
+    case "$CPU_COUNT" in ''|*[!0-9]*|0) CPU_COUNT=1 ;; esac
+    RAM_PAGES=$((RAM_KB / 4))                               ## Approximate 4KB pages
+    yellow_msg "Detected Resources: ${RAM_GB}GB RAM / ${CPU_COUNT} vCPU — Adaptive mode ON."
+}
 
 # Ask Reboot
 ask_reboot() {
@@ -297,7 +311,7 @@ swap_maker() {
     echo 
     sleep 0.5
 
-    if swapon --show 2>/dev/null | grep -q "$SWAP_PATH"; then
+    if swapon --show --noheadings 2>/dev/null | awk '{print $1}' | grep -qx "$SWAP_PATH"; then
         echo 
         yellow_msg "SWAP already exists."
         echo
@@ -313,14 +327,21 @@ swap_maker() {
         return
     fi
 
+    ## Adaptive SWAP sizing (MB-based): <=2G RAM -> 2x RAM, <=8G RAM -> 1x RAM, else cap 8G
+    if   [ "$RAM_MB" -le 2048 ]; then SWAP_MB=$((RAM_MB * 2))
+    elif [ "$RAM_MB" -le 8192 ]; then SWAP_MB="$RAM_MB"
+    else                             SWAP_MB=8192
+    fi
+    [ "$SWAP_MB" -lt 1024 ] && SWAP_MB=1024
+
     ## Make Swap
-    sudo fallocate -l "$SWAP_SIZE" "$SWAP_PATH"  ## Allocate size
+    sudo fallocate -l "${SWAP_MB}M" "$SWAP_PATH"  ## Allocate size
     sudo chmod 600 "$SWAP_PATH"                ## Set proper permission
     sudo mkswap "$SWAP_PATH"                   ## Setup swap         
     sudo swapon "$SWAP_PATH"                   ## Enable swap
     grep -q "$SWAP_PATH" /etc/fstab 2>/dev/null || echo "$SWAP_PATH   none    swap    sw    0   0" >> /etc/fstab ## Add to fstab
     echo 
-    green_msg 'SWAP Created Successfully.'
+    green_msg "SWAP Created Successfully (${SWAP_MB}M allocated for ${RAM_MB}M RAM)."
     echo
     sleep 0.5
 }
@@ -336,12 +357,22 @@ sysctl_optimizations() {
     echo 
     sleep 1
 
+    ## ---- Adaptive calculations (scale with this server's RAM) --------
+    FILE_MAX=$((RAM_KB / 10))
+    [ "$FILE_MAX" -lt 262144 ] && FILE_MAX=262144          ## Floor 256k fds
+    MIN_FREE=$((RAM_KB / 100))                             ## ~1% of RAM
+    [ "$MIN_FREE" -lt 16384 ]  && MIN_FREE=16384           ## Floor 16MB
+    [ "$MIN_FREE" -gt 262144 ] && MIN_FREE=262144          ## Cap 256MB
+    if [ "$RAM_GB" -ge 4 ]; then BUF_MAX=33554432; else BUF_MAX=16777216; fi  ## 32G vs 16M socket buffers
+    TCP_LOW=$((RAM_PAGES / 4)); TCP_PRESS=$((RAM_PAGES / 2)); TCP_HIGH="$RAM_PAGES"
+
     echo 
     yellow_msg 'Optimizing the Network...'
     echo 
     sleep 0.5
 
     sed -i -e '/fs.file-max/d' \
+        -e '/fs.nr_open/d' \
         -e '/net.core.default_qdisc/d' \
         -e '/net.core.netdev_max_backlog/d' \
         -e '/net.core.optmem_max/d' \
@@ -429,7 +460,9 @@ cat <<EOF >> "$SYS_PATH"
 ## ----------------------------------------------------------------
 
 # Set the maximum number of open file descriptors
-fs.file-max = 67108864
+fs.file-max = ${FILE_MAX}
+# Headroom for maximum open-file-descriptor limits (must exceed profile ulimit -n)
+fs.nr_open = 2097152
 
 
 ## Network core settings
@@ -448,13 +481,13 @@ net.core.optmem_max = 262144
 net.core.somaxconn = 65536
 
 # Configure maximum TCP receive buffer size
-net.core.rmem_max = 33554432
+net.core.rmem_max = ${BUF_MAX}
 
 # Set default TCP receive buffer size
 net.core.rmem_default = 1048576
 
 # Configure maximum TCP send buffer size
-net.core.wmem_max = 33554432
+net.core.wmem_max = ${BUF_MAX}
 
 # Set default TCP send buffer size
 net.core.wmem_default = 1048576
@@ -469,10 +502,10 @@ net.core.netdev_budget_usecs = 8000
 ## ----------------------------------------------------------------
 
 # Define socket receive buffer sizes
-net.ipv4.tcp_rmem = 16384 1048576 33554432
+net.ipv4.tcp_rmem = 16384 1048576 ${BUF_MAX}
 
 # Specify socket send buffer sizes
-net.ipv4.tcp_wmem = 16384 1048576 33554432
+net.ipv4.tcp_wmem = 16384 1048576 ${BUF_MAX}
 
 # Set TCP congestion control algorithm to BBR
 net.ipv4.tcp_congestion_control = bbr
@@ -497,7 +530,7 @@ net.ipv4.tcp_max_syn_backlog = 20480
 net.ipv4.tcp_max_tw_buckets = 1440000
 
 # Define TCP memory limits
-net.ipv4.tcp_mem = 65536 1048576 33554432
+net.ipv4.tcp_mem = ${TCP_LOW} ${TCP_PRESS} ${TCP_HIGH}
 
 # Enable TCP MTU probing
 net.ipv4.tcp_mtu_probing = 1
@@ -535,7 +568,7 @@ net.ipv4.tcp_tw_reuse = 1
 ## ----------------------------------------------------------------
 
 # Define UDP memory limits
-net.ipv4.udp_mem = 65536 1048576 33554432
+net.ipv4.udp_mem = ${TCP_LOW} ${TCP_PRESS} ${TCP_HIGH}
 
 
 ## IPv6 settings
@@ -562,7 +595,7 @@ net.unix.max_dgram_qlen = 256
 ## ----------------------------------------------------------------
 
 # Specify minimum free Kbytes at which VM pressure happens
-vm.min_free_kbytes = 65536
+vm.min_free_kbytes = ${MIN_FREE}
 
 # Define how aggressively swap memory pages are used
 vm.swappiness = 10
@@ -609,7 +642,7 @@ vm.dirty_ratio = 20
 
 EOF
 
-    if [ -e "$SWAP_PATH" ] || swapon --show 2>/dev/null | grep -q "$SWAP_PATH"; then
+    if [ -n "$(swapon --show --noheadings 2>/dev/null)" ] || [ -e "$SWAP_PATH" ]; then
 cat <<EOF >> "$SYS_PATH"
 # Strictly limits memory allocation to physical RAM + swap, preventing overcommit and reducing OOM risks.
 vm.overcommit_memory = 2
@@ -645,6 +678,8 @@ EOF
     fi
 
     sudo sysctl -p
+
+    green_msg "Applied: file-max=${FILE_MAX}, min_free_kbytes=${MIN_FREE}, buffer_max=${BUF_MAX}, tcp_mem=${TCP_LOW}/${TCP_PRESS}/${TCP_HIGH}"
     
     echo 
     green_msg 'Network is Optimized.'
@@ -927,7 +962,7 @@ show_menu() {
     echo 
     green_msg '6  - Complete Update & Clean the OS.'
     green_msg '7  - Install Useful Packages.'
-    green_msg '8  - Make SWAP (2Gb).'
+    green_msg '8  - Make SWAP (Auto-Sized by RAM).'
     green_msg '9  - Optimize the Network, SSH & System Limits.'
     echo 
     green_msg '10 - Optimize the Network settings.'
