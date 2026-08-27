@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -o pipefail
 
 # Green, Yellow & Red Messages.
@@ -29,6 +28,25 @@ SSH_PATH="/etc/ssh/sshd_config"
 SWAP_PATH="/swapfile"
 SWAP_SIZE="2G"
 LIMITS_CONF="/etc/security/limits.d/99-optimizer.conf"
+APT_UPDATED=0
+
+# Central package list guard - ensures only one update per script run (Option 1)
+# Preserves idempotency: standalone calls still update if flag is 0
+apt_update_once() {
+    if [ "$APT_UPDATED" = "1" ]; then
+        yellow_msg "Skipping package list update (already done this run)"
+        return 0
+    fi
+    yellow_msg "Running package list update..."
+    if apt -q update; then # apt update
+        APT_UPDATED=1
+        return 0
+    else
+        yellow_msg "package list update failed (will retry on next call)"
+        # Do not set flag, so next caller can retry
+        return 1
+    fi
+}
 
 # Root
 check_if_running_as_root() {
@@ -71,13 +89,13 @@ complete_update() {
     sleep 0.5
 
     export DEBIAN_FRONTEND=noninteractive
-    apt -q update
+    apt_update_once || yellow_msg "package list update had warnings, continuing..."
     apt -y upgrade
     apt -y full-upgrade
     apt -y autoremove --purge
     apt -y autoclean
     apt -y clean
-    apt -q update
+    apt_update_once || yellow_msg "package list update had warnings, continuing..."
 
     echo
     green_msg 'System Updated & Cleaned Successfully.'
@@ -113,7 +131,7 @@ installations() {
     sleep 0.5
 
     export DEBIAN_FRONTEND=noninteractive
-    apt -q update || yellow_msg "apt update had warnings, continuing..."
+    apt_update_once || yellow_msg "package list update had warnings, continuing..."
 
     # FIX: Install packages individually so one missing package doesn't fail entire batch
     # Common failure: preload, haveged, busybox, binutils-x86-64-linux-gnu removed on newer Ubuntu
@@ -269,68 +287,439 @@ swap_maker() {
     sleep 0.5
 }
 
-# SYSCTL Optimization - FIXED
+# SYSCTL Optimization - PROFILE BASED FOR VPN (balanced/high-throughput/low-latency/conservative/auto)
 sysctl_optimizations() {
+    local profile_input="${1:-}"
+    local profile=""
+    local selected_profile=""
+    local auto_reason=""
+    local ram_gb="unknown"
+    local cpu_cores="unknown"
+    local iface="unknown"
+    local speed="unknown"
+    local TCP_CC="cubic"
+    local QDISC="fq_codel"
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
+    
+    # --- Helper: detect RAM GB ---
+    detect_ram_gb() {
+        local mem_kb
+        mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
+        if [ -n "$mem_kb" ] && [[ "$mem_kb" =~ ^[0-9]+$ ]]; then
+            echo $(( (mem_kb + 1048575) / 1048576 ))
+            return
+        fi
+        local mem_mb
+        mem_mb=$(free -m 2>/dev/null | awk '/^Mem:/ {print $2}')
+        if [ -n "$mem_mb" ] && [[ "$mem_mb" =~ ^[0-9]+$ ]]; then
+            echo $(( (mem_mb + 1023) / 1024 ))
+            return
+        fi
+        echo "unknown"
+    }
+    
+    detect_cpu_cores() {
+        if command -v nproc >/dev/null 2>&1; then
+            nproc 2>/dev/null || echo "1"
+        else
+            grep -c ^processor /proc/cpuinfo 2>/dev/null || echo "1"
+        fi
+    }
+    
+    detect_primary_iface() {
+        local _iface=""
+        if command -v ip >/dev/null 2>&1; then
+            _iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+            if [ -z "$_iface" ]; then
+                _iface=$(ip -4 route ls 2>/dev/null | grep -m1 default | awk '{print $5}')
+            fi
+        fi
+        if [ -z "$_iface" ] && [ -d /sys/class/net ]; then
+            for f in /sys/class/net/*; do
+                local bn
+                bn=$(basename "$f")
+                [ "$bn" != "lo" ] && _iface="$bn" && break
+            done
+        fi
+        [ -z "$_iface" ] && _iface="unknown"
+        echo "$_iface"
+    }
+    
+    detect_link_speed() {
+        local _iface="$1"
+        local _speed="unknown"
+        local raw=""
+        if [ -z "$_iface" ] || [ "$_iface" = "unknown" ] || [ "$_iface" = "lo" ]; then
+            echo "unknown"
+            return
+        fi
+        if command -v ethtool >/dev/null 2>&1; then
+            raw=$(ethtool "$_iface" 2>/dev/null | grep -i "Speed:" | awk -F: '{print $2}' | tr -d ' ')
+            if echo "$raw" | grep -qi "unknown"; then
+                _speed="unknown"
+            elif [ -n "$raw" ]; then
+                local num
+                num=$(echo "$raw" | grep -oE "[0-9]+" | head -n1)
+                if [ -n "$num" ] && [[ "$num" =~ ^[0-9]+$ ]]; then
+                    if echo "$raw" | grep -q "Gb/s"; then
+                        num=$((num * 1000))
+                    fi
+                    _speed="$num"
+                else
+                    _speed="unknown"
+                fi
+            fi
+        fi
+        if [ "$_speed" = "unknown" ] && [ -f "/sys/class/net/$_iface/speed" ]; then
+            raw=$(cat "/sys/class/net/$_iface/speed" 2>/dev/null | tr -d ' ')
+            if [ -n "$raw" ] && [ "$raw" != "-1" ] && ! echo "$raw" | grep -qi "unknown" && [[ "$raw" =~ ^[0-9]+$ ]]; then
+                _speed="$raw"
+            fi
+        fi
+        # Final validation: ensure numeric or unknown
+        if [ "$_speed" != "unknown" ] && ! [[ "$_speed" =~ ^[0-9]+$ ]]; then
+            _speed="unknown"
+        fi
+        echo "$_speed"
+    }
+    
+    # --- Profile validation and selection ---
+    if [ -n "$profile_input" ]; then
+        case "$profile_input" in
+            balanced|vpn-high-throughput|vpn-low-latency|conservative|auto)
+                profile="$profile_input"
+                ;;
+            *)
+                red_msg "Invalid profile: $profile_input"
+                echo "Valid profiles: balanced, vpn-high-throughput, vpn-low-latency, conservative, auto" >&2
+                return 1
+                ;;
+        esac
+    else
+        # No argument supplied
+        if [ -t 0 ]; then
+            echo
+            yellow_msg "Select sysctl profile:"
+            echo "  1) balanced              - General-purpose VPN/server (DEFAULT, stable + good perf)"
+            echo "  2) vpn-high-throughput   - High-bandwidth VPN, many connections (>=8GB RAM / >=4 CPU / >=1Gbps)"
+            echo "  3) vpn-low-latency       - Optimize for latency/jitter, smaller buffers, conservative busy_poll"
+            echo "  4) conservative          - Minimal changes, safe improvements only"
+            echo "  5) auto                  - Automatically select best profile (RAM/CPU/speed detection)"
+            echo
+            printf "Enter choice [1-5] (default 1): "
+            local choice
+            read -r choice
+            case "$choice" in
+                1|"") profile="balanced" ;;
+                2) profile="vpn-high-throughput" ;;
+                3) profile="vpn-low-latency" ;;
+                4) profile="conservative" ;;
+                5) profile="auto" ;;
+                balanced|vpn-high-throughput|vpn-low-latency|conservative|auto) profile="$choice" ;;
+                *)
+                    red_msg "Invalid choice, defaulting to balanced"
+                    profile="balanced"
+                    ;;
+            esac
+        else
+            yellow_msg "No profile supplied and non-interactive shell detected, defaulting to balanced"
+            profile="balanced"
+        fi
+    fi
+    
+    # Gather detection info for header and auto selection (needed for all profiles for logging)
+    ram_gb=$(detect_ram_gb)
+    cpu_cores=$(detect_cpu_cores)
+    iface=$(detect_primary_iface)
+    speed=$(detect_link_speed "$iface")
+    
+    # Ensure ram_gb and cpu_cores are numeric for calculations, fallback to 2GB/1 core if unknown
+    local ram_gb_num=2
+    if [[ "$ram_gb" =~ ^[0-9]+$ ]]; then
+        ram_gb_num="$ram_gb"
+    fi
+    local cpu_cores_num=1
+    if [[ "$cpu_cores" =~ ^[0-9]+$ ]]; then
+        cpu_cores_num="$cpu_cores"
+    fi
+    
+    # Auto selection logic
+    if [ "$profile" = "auto" ]; then
+        if [[ "$ram_gb" =~ ^[0-9]+$ ]] && [ "$ram_gb" -ge 8 ] && [ "$cpu_cores_num" -ge 4 ]; then
+            selected_profile="vpn-high-throughput"
+            auto_reason="RAM >=8GB ($ram_gb GB) and CPU >=4 ($cpu_cores cores)"
+        elif [ "$speed" != "unknown" ] && [[ "$speed" =~ ^[0-9]+$ ]] && [ "$speed" -ge 1000 ]; then
+            selected_profile="vpn-high-throughput"
+            auto_reason="link speed >=1Gbps ($speed Mb/s on $iface)"
+        else
+            selected_profile="balanced"
+            if [ "$speed" = "unknown" ]; then
+                auto_reason="default (RAM ${ram_gb}GB, CPU ${cpu_cores} cores, speed unknown - not guessing)"
+            else
+                auto_reason="default (RAM ${ram_gb}GB, CPU ${cpu_cores} cores, speed ${speed}Mb/s <1Gbps)"
+            fi
+        fi
+        # Print auto detection details as required
+        echo
+        yellow_msg "Auto detection:"
+        echo "  Detected RAM: ${ram_gb} GB"
+        echo "  CPU cores: ${cpu_cores}"
+        echo "  Network interface: ${iface}"
+        echo "  Detected link speed: ${speed} $([ "$speed" != "unknown" ] && echo "Mb/s" || echo "")"
+        echo "  Selected profile: ${selected_profile}"
+        echo "  Reason: ${auto_reason}"
+        echo
+    else
+        selected_profile="$profile"
+    fi
+    
     echo
-    yellow_msg 'Optimizing Network via sysctl...'
+    yellow_msg "Optimizing Network via sysctl (profile: $selected_profile)..."
     echo
     sleep 0.5
-
-    # FIX: Use dedicated drop-in file instead of polluting /etc/sysctl.conf
-    # Backup original sysctl.conf once with timestamp, not overwrite
+    
+    # Preserve existing idempotent backup behavior for legacy sysctl.conf
     if [ -f "$SYS_PATH" ]; then
         cp -n "$SYS_PATH" "/etc/sysctl.conf.bak.$(date +%F-%H%M%S)" 2>/dev/null || cp "$SYS_PATH" "/etc/sysctl.conf.bak"
         green_msg "Backup of sysctl.conf created."
     fi
-
-    # Check if BBR is available, otherwise fallback to cubic
+    
+    # BBR detection (preserve existing)
     TCP_CC="bbr"
     if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
-        # Try to load bbr module
         modprobe tcp_bbr 2>/dev/null || true
         if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
             yellow_msg "BBR not available, falling back to cubic"
             TCP_CC="cubic"
         fi
     fi
-
-    # Determine if fq qdisc is available
+    
+    # QDISC detection (preserve)
     QDISC="fq"
+    # Check if fq is available via /proc or sysctl
     if [ ! -d /proc/sys/net/core/default_qdisc ]; then
         QDISC="fq_codel"
+    else
+        # Also test if fq is supported (some kernels only have fq_codel)
+        if ! sysctl net.core.default_qdisc 2>/dev/null | grep -q .; then
+            QDISC="fq_codel"
+        fi
+        # Try to check available qdiscs? Keep simple: prefer fq, fallback to fq_codel if fq not in available
+        # If we have tc, we could check, but keep as before
     fi
-
-    # Create optimizer sysctl file (idempotent - overwrite, not append)
-    cat > "$SYS_OPTIMIZER_PATH" <<EOF
+    # Validate QDISC actually supported: if fq not available, use fq_codel
+    # We can test by trying to set it temporarily? Instead just keep fq if /proc exists, else fq_codel
+    
+    # RAM-aware memory settings
+    local tcp_mem=""
+    local udp_mem=""
+    local min_free_kbytes=""
+    # Determine based on RAM and profile
+    case "$selected_profile" in
+        balanced)
+            if [ "$ram_gb_num" -lt 2 ]; then
+                tcp_mem="8192 32768 65536"
+                udp_mem="8192 16384 32768"
+                min_free_kbytes="16384"
+            elif [ "$ram_gb_num" -lt 4 ]; then
+                tcp_mem="16384 65536 131072"
+                udp_mem="16384 32768 65536"
+                min_free_kbytes="32768"
+            elif [ "$ram_gb_num" -lt 8 ]; then
+                tcp_mem="32768 131072 262144"
+                udp_mem="32768 65536 131072"
+                min_free_kbytes="65536"
+            else
+                tcp_mem="65536 262144 524288"
+                udp_mem="65536 131072 262144"
+                min_free_kbytes="65536"
+            fi
+            ;;
+        vpn-high-throughput)
+            if [ "$ram_gb_num" -lt 2 ]; then
+                tcp_mem="16384 65536 131072"
+                udp_mem="16384 32768 65536"
+                min_free_kbytes="32768"
+            elif [ "$ram_gb_num" -lt 4 ]; then
+                tcp_mem="32768 131072 262144"
+                udp_mem="32768 65536 131072"
+                min_free_kbytes="65536"
+            elif [ "$ram_gb_num" -lt 8 ]; then
+                tcp_mem="65536 262144 524288"
+                udp_mem="65536 131072 262144"
+                min_free_kbytes="65536"
+            else
+                tcp_mem="98304 393216 786432"
+                udp_mem="98304 196608 393216"
+                min_free_kbytes="131072"
+            fi
+            ;;
+        vpn-low-latency)
+            if [ "$ram_gb_num" -lt 2 ]; then
+                tcp_mem="8192 16384 32768"
+                udp_mem="8192 16384 32768"
+                min_free_kbytes="16384"
+            elif [ "$ram_gb_num" -lt 4 ]; then
+                tcp_mem="8192 32768 65536"
+                udp_mem="8192 16384 32768"
+                min_free_kbytes="16384"
+            elif [ "$ram_gb_num" -lt 8 ]; then
+                tcp_mem="16384 65536 131072"
+                udp_mem="16384 32768 65536"
+                min_free_kbytes="32768"
+            else
+                tcp_mem="32768 131072 262144"
+                udp_mem="32768 65536 131072"
+                min_free_kbytes="65536"
+            fi
+            ;;
+        conservative)
+            tcp_mem=""
+            udp_mem=""
+            min_free_kbytes="16384"
+            ;;
+    esac
+    
+    # Check busy_poll support for low-latency (conservative, only if kernel supports)
+    local busy_poll_supported=0
+    if sysctl -n net.core.busy_poll >/dev/null 2>&1; then
+        busy_poll_supported=1
+    fi
+    
+    # Generate profile-specific config (OVERWRITE, never append)
+    # Include clear header with selected profile and detection information
+    local header_info
+    header_info="# Generated: $timestamp
+# Selected profile: $selected_profile
+# Requested profile: $profile
+# Detected RAM: ${ram_gb} GB
+# Detected CPU cores: ${cpu_cores}
+# Detected interface: ${iface}
+# Detected link speed: ${speed} $([ "$speed" != "unknown" ] && [ "$speed" != "unknown" ] && echo "Mb/s" || echo "")
+# Auto reason: ${auto_reason:-N/A (direct selection)}
+# BBR: $TCP_CC
+# QDISC: $QDISC
+# RAM-aware tcp_mem: ${tcp_mem:-not set (conservative)}
+# Host: $(hostname 2>/dev/null || echo unknown) Kernel: $(uname -r 2>/dev/null || echo unknown)"
+    
+    # Ensure we overwrite, not append
+    case "$selected_profile" in
+        balanced)
+            cat > "$SYS_OPTIMIZER_PATH" <<EOF
 ################################################################
-# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer (Fixed)
+# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer
+################################################################
+$header_info
+################################################################
+# Profile: balanced - General-purpose VPN/server (stable + good perf)
+# Moderate buffers, BBR+$QDISC when supported, safe limits
 ################################################################
 
-## File system settings
+# File system
 fs.file-max = 67108864
 
-## Network core settings
-net.core.default_qdisc = ${QDISC}
-net.core.netdev_max_backlog = 32768
+# Network core - moderate
+net.core.default_qdisc = $QDISC
+net.core.netdev_max_backlog = 16384
 net.core.optmem_max = 262144
+net.core.somaxconn = 16384
+net.core.rmem_max = 16777216
+net.core.rmem_default = 262144
+net.core.wmem_max = 16777216
+net.core.wmem_default = 262144
+
+# TCP - balanced
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_congestion_control = $TCP_CC
+net.ipv4.tcp_fin_timeout = 20
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_max_orphans = 262144
+net.ipv4.tcp_max_syn_backlog = 8192
+net.ipv4.tcp_max_tw_buckets = 144000
+net.ipv4.tcp_mem = $tcp_mem
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_retries2 = 8
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_ecn = 1
+net.ipv4.tcp_ecn_fallback = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# UDP - balanced
+net.ipv4.udp_mem = $udp_mem
+
+# UNIX
+net.unix.max_dgram_qlen = 256
+
+# VM - RAM-aware balanced
+vm.min_free_kbytes = $min_free_kbytes
+vm.swappiness = 10
+vm.vfs_cache_pressure = 100
+vm.dirty_ratio = 10
+vm.overcommit_memory = 0
+vm.overcommit_ratio = 50
+
+# Network security
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.neigh.default.gc_thresh1 = 512
+net.ipv4.neigh.default.gc_thresh2 = 2048
+net.ipv4.neigh.default.gc_thresh3 = 4096
+net.ipv4.neigh.default.gc_stale_time = 60
+net.ipv4.conf.default.arp_announce = 2
+net.ipv4.conf.lo.arp_announce = 2
+net.ipv4.conf.all.arp_announce = 2
+kernel.panic = 1
+
+EOF
+            ;;
+        vpn-high-throughput)
+            cat > "$SYS_OPTIMIZER_PATH" <<EOF
+################################################################
+# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer
+################################################################
+$header_info
+################################################################
+# Profile: vpn-high-throughput - High-bandwidth VPN, many conns
+# Larger buffers, BBR+$QDISC, RAM-aware, for >=8GB/>=4CPU or >=1Gbps
+################################################################
+
+# File system
+fs.file-max = 67108864
+
+# Network core - high throughput
+net.core.default_qdisc = $QDISC
+net.core.netdev_max_backlog = 32768
+net.core.optmem_max = 524288
 net.core.somaxconn = 65536
 net.core.rmem_max = 33554432
 net.core.rmem_default = 1048576
 net.core.wmem_max = 33554432
 net.core.wmem_default = 1048576
 
-## TCP settings
-net.ipv4.tcp_rmem = 16384 1048576 33554432
-net.ipv4.tcp_wmem = 16384 1048576 33554432
-net.ipv4.tcp_congestion_control = ${TCP_CC}
+# TCP - high throughput
+net.ipv4.tcp_rmem = 4096 131072 33554432
+net.ipv4.tcp_wmem = 4096 131072 33554432
+net.ipv4.tcp_congestion_control = $TCP_CC
 net.ipv4.tcp_fin_timeout = 25
-net.ipv4.tcp_keepalive_time = 1200
-net.ipv4.tcp_keepalive_probes = 7
+net.ipv4.tcp_keepalive_time = 600
+net.ipv4.tcp_keepalive_probes = 5
 net.ipv4.tcp_keepalive_intvl = 30
-net.ipv4.tcp_max_orphans = 819200
+net.ipv4.tcp_max_orphans = 524288
 net.ipv4.tcp_max_syn_backlog = 20480
 net.ipv4.tcp_max_tw_buckets = 1440000
-net.ipv4.tcp_mem = 65536 1048576 33554432
+net.ipv4.tcp_mem = $tcp_mem
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_notsent_lowat = 32768
 net.ipv4.tcp_retries2 = 8
@@ -344,28 +733,28 @@ net.ipv4.tcp_ecn_fallback = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fastopen = 3
 
-## UDP settings
-net.ipv4.udp_mem = 65536 1048576 33554432
+# UDP - high throughput
+net.ipv4.udp_mem = $udp_mem
 
-## UNIX domain sockets
-net.unix.max_dgram_qlen = 256
+# UNIX
+net.unix.max_dgram_qlen = 512
 
-## Virtual memory settings
-vm.min_free_kbytes = 65536
+# VM - RAM-aware high throughput
+vm.min_free_kbytes = $min_free_kbytes
 vm.swappiness = 10
-vm.vfs_cache_pressure = 250
-vm.dirty_ratio = 20
+vm.vfs_cache_pressure = 100
+vm.dirty_ratio = 15
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-## Network Configuration
-net.ipv4.conf.default.rp_filter = 2
-net.ipv4.conf.all.rp_filter = 2
+# Network security
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
-net.ipv4.neigh.default.gc_thresh1 = 512
+net.ipv4.neigh.default.gc_thresh1 = 1024
 net.ipv4.neigh.default.gc_thresh2 = 2048
-net.ipv4.neigh.default.gc_thresh3 = 16384
+net.ipv4.neigh.default.gc_thresh3 = 8192
 net.ipv4.neigh.default.gc_stale_time = 60
 net.ipv4.conf.default.arp_announce = 2
 net.ipv4.conf.lo.arp_announce = 2
@@ -373,34 +762,236 @@ net.ipv4.conf.all.arp_announce = 2
 kernel.panic = 1
 
 EOF
+            ;;
+        vpn-low-latency)
+            cat > "$SYS_OPTIMIZER_PATH" <<EOF
+################################################################
+# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer
+################################################################
+$header_info
+################################################################
+# Profile: vpn-low-latency - Low latency/jitter, smaller buffers
+# BBR+$QDISC, conservative busy_poll if supported
+################################################################
 
-    # Optional: Clean old duplicated entries from /etc/sysctl.conf if script was run before with buggy version
-    # Remove our managed keys from main sysctl.conf to avoid confusion (keep custom user entries)
-    # Create backup before cleaning
+# File system
+fs.file-max = 67108864
+
+# Network core - low latency (smaller buffers)
+net.core.default_qdisc = $QDISC
+net.core.netdev_max_backlog = 10000
+net.core.optmem_max = 262144
+net.core.somaxconn = 8192
+net.core.rmem_max = 8388608
+net.core.rmem_default = 212992
+net.core.wmem_max = 8388608
+net.core.wmem_default = 212992
+
+# TCP - low latency
+net.ipv4.tcp_rmem = 4096 87380 8388608
+net.ipv4.tcp_wmem = 4096 87380 8388608
+net.ipv4.tcp_congestion_control = $TCP_CC
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_max_orphans = 131072
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_max_tw_buckets = 72000
+net.ipv4.tcp_mem = $tcp_mem
+net.ipv4.tcp_mtu_probing = 1
+net.ipv4.tcp_notsent_lowat = 16384
+net.ipv4.tcp_retries2 = 8
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_dsack = 1
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_ecn = 1
+net.ipv4.tcp_ecn_fallback = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 3
+
+# UDP - low latency
+net.ipv4.udp_mem = $udp_mem
+
+# UNIX
+net.unix.max_dgram_qlen = 256
+
+# VM - RAM-aware low latency
+vm.min_free_kbytes = $min_free_kbytes
+vm.swappiness = 10
+vm.vfs_cache_pressure = 100
+vm.dirty_ratio = 10
+vm.overcommit_memory = 0
+vm.overcommit_ratio = 50
+
+# Network security
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv4.neigh.default.gc_thresh1 = 512
+net.ipv4.neigh.default.gc_thresh2 = 2048
+net.ipv4.neigh.default.gc_thresh3 = 4096
+net.ipv4.neigh.default.gc_stale_time = 60
+net.ipv4.conf.default.arp_announce = 2
+net.ipv4.conf.lo.arp_announce = 2
+net.ipv4.conf.all.arp_announce = 2
+kernel.panic = 1
+
+EOF
+            # Add conservative busy_poll only if supported (not aggressive)
+            if [ "$busy_poll_supported" = "1" ]; then
+                {
+                    echo "# Busy poll - conservative (only if supported, low CPU impact)"
+                    echo "net.core.busy_poll = 50"
+                    echo "net.core.busy_read = 50"
+                } >> "$SYS_OPTIMIZER_PATH"
+                yellow_msg "Enabled conservative busy_poll (50) - kernel supports it"
+            else
+                yellow_msg "Skipping busy_poll - not supported by current kernel"
+            fi
+            ;;
+        conservative)
+            cat > "$SYS_OPTIMIZER_PATH" <<EOF
+################################################################
+# /etc/sysctl.d/99-optimizer.conf - Generated by Linux-Optimizer
+################################################################
+$header_info
+################################################################
+# Profile: conservative - Minimal changes, safe improvements only
+# Preserves kernel defaults where practical
+################################################################
+
+# File system - minimal increase
+fs.file-max = 2097152
+
+# Network core - conservative (small safe increases)
+net.core.default_qdisc = $QDISC
+net.core.netdev_max_backlog = 5000
+net.core.optmem_max = 204800
+net.core.somaxconn = 4096
+# Preserve default rmem/wmem (not overriding) - only set safe defaults if needed
+# rmem/wmem left at kernel default for conservative
+
+# TCP - conservative (only safe improvements)
+net.ipv4.tcp_congestion_control = $TCP_CC
+net.ipv4.tcp_fin_timeout = 30
+net.ipv4.tcp_keepalive_time = 720
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_max_syn_backlog = 4096
+net.ipv4.tcp_max_tw_buckets = 144000
+net.ipv4.tcp_sack = 1
+net.ipv4.tcp_window_scaling = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.tcp_fastopen = 0
+
+# UDP - not overriding (kernel default)
+# VM - minimal
+vm.min_free_kbytes = $min_free_kbytes
+vm.swappiness = 30
+vm.vfs_cache_pressure = 100
+vm.dirty_ratio = 20
+vm.overcommit_memory = 0
+vm.overcommit_ratio = 50
+
+# Network security - safe
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+kernel.panic = 1
+
+EOF
+            ;;
+    esac
+    
+    # Validate generated configuration (basic syntax, no duplicates)
+    if [ ! -s "$SYS_OPTIMIZER_PATH" ]; then
+        red_msg "Generated sysctl config is empty!"
+        return 1
+    fi
+    # Check for duplicate keys (excluding comments/empty)
+    local dup_keys
+    dup_keys=$(grep -v "^#" "$SYS_OPTIMIZER_PATH" | grep -v "^$" | cut -d= -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | uniq -d)
+    if [ -n "$dup_keys" ]; then
+        red_msg "Duplicate keys found in generated config:"
+        echo "$dup_keys"
+        return 1
+    fi
+    
+    # Backup/cleanup legacy sysctl.conf: remove only optimizer-managed keys
     if grep -q "99-optimizer" "$SYS_PATH" 2>/dev/null; then
         sed -i '/99-optimizer/d' "$SYS_PATH"
     fi
-    # Remove stale optimizer block if it exists in sysctl.conf (between markers)
-    if grep -q "File system settings" "$SYS_PATH"; then
+    # Check for old optimizer block marker (legacy)
+    if grep -q "File system settings" "$SYS_PATH" 2>/dev/null || grep -q "Generated by Linux-Optimizer" "$SYS_PATH" 2>/dev/null; then
         yellow_msg "Cleaning old optimizer block from $SYS_PATH (now using $SYS_OPTIMIZER_PATH)"
-        # Only remove known keys to avoid deleting user comments (FIX: don't delete ^# and ^$)
-        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.core.busy_poll net.core.busy_read net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
             sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
         done
-    fi
-
-    chmod 644 "$SYS_OPTIMIZER_PATH"
-
-    # Apply without errors interrupting script
-    if sysctl --system >/dev/null 2>&1; then
-        green_msg "sysctl --system applied successfully"
     else
-        yellow_msg "sysctl --system had warnings, trying sysctl -p $SYS_OPTIMIZER_PATH"
-        sysctl -p "$SYS_OPTIMIZER_PATH" || red_msg "sysctl apply failed - check $SYS_OPTIMIZER_PATH"
+        # Even if no marker, clean known managed keys if they were previously added without marker (idempotent)
+        # Only if they exist and were likely added by previous run (check if file contains our values)
+        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+            if grep -q "^${key}[[:space:]]*=" "$SYS_PATH" 2>/dev/null; then
+                # Preserve user comments, only remove exact managed keys - but we need to be conservative: only remove if duplicate also in new file?
+                # For idempotency, remove from sysctl.conf if same key exists in new drop-in (to avoid duplication)
+                if grep -q "^${key}[[:space:]]*=" "$SYS_OPTIMIZER_PATH" 2>/dev/null; then
+                    sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
+                fi
+            fi
+        done
     fi
-
+    
+    chmod 644 "$SYS_OPTIMIZER_PATH"
+    
+    # Apply: sysctl --system with graceful handling of unsupported keys
     echo
-    green_msg 'Network is Optimized. Config: /etc/sysctl.d/99-optimizer.conf'
+    yellow_msg "Applying sysctl settings (profile: $selected_profile)..."
+    local apply_log
+    apply_log=$(mktemp)
+    # Use sysctl --system, capture output
+    if sysctl --system 2>&1 | tee "$apply_log"; then
+        # Even if exit 0, check for individual key failures in log
+        if grep -q -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log"; then
+            yellow_msg "Some sysctl keys reported warnings (likely unsupported on this kernel):"
+            grep -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log" | head -n 20
+            yellow_msg "Continuing - unsupported keys ignored, other settings applied"
+        else
+            green_msg "sysctl --system applied successfully"
+        fi
+    else
+        # Non-zero exit, but still check log for details
+        yellow_msg "sysctl --system had warnings, checking details..."
+        if grep -q -i "error\|invalid\|cannot stat\|unknown key" "$apply_log"; then
+            yellow_msg "Failed keys:"
+            grep -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log" | head -n 20
+        fi
+        # Fallback try direct apply of our file, but don't hide errors
+        yellow_msg "Trying sysctl -p $SYS_OPTIMIZER_PATH for detailed errors..."
+        local p_log
+        p_log=$(mktemp)
+        if sysctl -p "$SYS_OPTIMIZER_PATH" 2>&1 | tee "$p_log"; then
+            if grep -q -i "error\|invalid" "$p_log"; then
+                yellow_msg "Some keys in $SYS_OPTIMIZER_PATH unsupported:"
+                grep -i "error\|invalid" "$p_log"
+            else
+                green_msg "sysctl -p applied successfully"
+            fi
+        else
+            red_msg "sysctl -p also reported errors:"
+            cat "$p_log"
+            yellow_msg "Continuing - check $SYS_OPTIMIZER_PATH, unsupported keys ignored"
+        fi
+        rm -f "$p_log"
+    fi
+    rm -f "$apply_log"
+    
+    echo
+    green_msg "Network is Optimized (profile: $selected_profile). Config: $SYS_OPTIMIZER_PATH"
     echo
     sleep 0.5
 }
@@ -648,7 +1239,7 @@ ufw_optimizations() {
         apt -y purge firewalld 2>/dev/null || true
     fi
 
-    apt -q update
+    apt_update_once || yellow_msg "package list update had warnings, continuing..."
     apt install -y ufw 2>/dev/null || {
         red_msg "UFW install failed"
         return 1
