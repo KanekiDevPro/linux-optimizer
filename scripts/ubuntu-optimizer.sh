@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# https://github.com/hawshemi/Linux-Optimizer - FIXED VERSION
+# Fixes: removed XanMod, fixed swap_maker, sysctl_optimizations, limits_optimizations, ufw_optimizations, removed UDP ports
+# Additional Fixes: reasonable SSH keepalive (300/3), disabled insecure forwarding by default, removed numfmt dep, per-package installs, preserve custom ulimit, fixed df filesystem
 
 set -o pipefail
 
@@ -96,7 +99,6 @@ complete_update() {
     apt -y autoremove --purge
     apt -y autoclean
     apt -y clean
-    apt_update_once || yellow_msg "package list update had warnings, continuing..."
 
     echo
     green_msg 'System Updated & Cleaned Successfully.'
@@ -480,9 +482,10 @@ sysctl_optimizations() {
     echo
     sleep 0.5
     
-    # Preserve existing idempotent backup behavior for legacy sysctl.conf
+    # Preserve existing idempotent backup behavior for legacy sysctl.conf (portable, without nonportable flag)
     if [ -f "$SYS_PATH" ]; then
-        cp -n "$SYS_PATH" "/etc/sysctl.conf.bak.$(date +%F-%H%M%S)" 2>/dev/null || cp "$SYS_PATH" "/etc/sysctl.conf.bak"
+        _backup_dest="/etc/sysctl.conf.bak.$(date +%F-%H%M%S)"
+        [ -f "$_backup_dest" ] || cp "$SYS_PATH" "$_backup_dest" 2>/dev/null || cp "$SYS_PATH" "/etc/sysctl.conf.bak" 2>/dev/null || true
         green_msg "Backup of sysctl.conf created."
     fi
     
@@ -496,21 +499,45 @@ sysctl_optimizations() {
         fi
     fi
     
-    # QDISC detection (preserve)
-    QDISC="fq"
-    # Check if fq is available via /proc or sysctl
-    if [ ! -d /proc/sys/net/core/default_qdisc ]; then
-        QDISC="fq_codel"
-    else
-        # Also test if fq is supported (some kernels only have fq_codel)
-        if ! sysctl net.core.default_qdisc 2>/dev/null | grep -q .; then
+    # QDISC detection - real fq capability (fixed: do not rely on directory test for default_qdisc)
+    QDISC="fq_codel"
+    # Detect active/default interface for qdisc test where appropriate (use already detected $iface if available, else detect)
+    local _qdisc_iface="$iface"
+    if [ -z "$_qdisc_iface" ] || [ "$_qdisc_iface" = "unknown" ]; then
+        if command -v ip >/dev/null 2>&1; then
+            _qdisc_iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") {print $(i+1); exit}}')
+            [ -z "$_qdisc_iface" ] && _qdisc_iface=$(ip -4 route ls 2>/dev/null | grep -m1 default | awk '{print $5}')
+        fi
+        [ -z "$_qdisc_iface" ] && _qdisc_iface="lo"
+    fi
+    # Attempt to load sch_fq when available (do not fail if modprobe unavailable)
+    if command -v modprobe >/dev/null 2>&1; then
+        modprobe sch_fq 2>/dev/null || true
+    fi
+    # Verify fq is actually usable before selecting it (prefer fq, fallback fq_codel)
+    if lsmod 2>/dev/null | grep -qw "sch_fq"; then
+        QDISC="fq"
+    elif command -v modinfo >/dev/null 2>&1 && modinfo sch_fq >/dev/null 2>&1; then
+        QDISC="fq"
+    elif command -v tc >/dev/null 2>&1; then
+        # Test fq via tc on lo (safe, cleanup afterwards)
+        if tc qdisc add dev lo root fq 2>/dev/null; then
+            tc qdisc del dev lo root 2>/dev/null || true
+            QDISC="fq"
+        elif tc qdisc add dev "$_qdisc_iface" root fq 2>/dev/null; then
+            tc qdisc del dev "$_qdisc_iface" root 2>/dev/null || true
+            QDISC="fq"
+        fi
+    elif sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then
+        if sysctl -n net.core.default_qdisc 2>/dev/null | grep -qw "fq"; then
+            QDISC="fq"
+        else
+            sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
             QDISC="fq_codel"
         fi
-        # Try to check available qdiscs? Keep simple: prefer fq, fallback to fq_codel if fq not in available
-        # If we have tc, we could check, but keep as before
+    else
+        QDISC="fq_codel"
     fi
-    # Validate QDISC actually supported: if fq not available, use fq_codel
-    # We can test by trying to set it temporarily? Instead just keep fq if /proc exists, else fq_codel
     
     # RAM-aware memory settings
     local tcp_mem=""
