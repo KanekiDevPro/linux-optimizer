@@ -1,4 +1,16 @@
 #!/usr/bin/env bash
+# Linux Optimizer Bootstrap — Secure, Idempotent, Reversible
+# Source: https://github.com/KanekiDevPro/linux-optimizer
+# Pinned ref: c3f1f819628f0cd63319d7b94c51b3945555561a (commit SHA, 2026-08-27)
+# Verified SHA256 (computed from https://raw.githubusercontent.com/.../<REF>/scripts/*):
+#   ubuntu-optimizer.sh  = 56423a1017c791be54f98e7a90d897166b0760af45f3f3d25a2b843ca9da78a1
+#   debian-optimizer.sh  = 34b18177213e4fbe622933c3813ffd04aae661921ca1061918d5eedc906fd4f2
+#   centos-optimizer.sh  = 23a73c7bf2783afaccc889ce77467c1b40edef9b576427c341014528a50d8c26 (also for almalinux)
+#   fedora-optimizer.sh  = f9f8032f97e381be1d1d1d2bc07e04923ca946d0fc7a931fe76a7e2751bc4a79
+# Regenerate: sha256sum <file> after verifying GPG tag/commit signature at GitHub release page.
+# Banner supported: Ubuntu 20.04/22.04/24.04, Debian 11/12, CentOS Stream 8/9, AlmaLinux 8/9, Fedora 37+ (see OS validation below)
+# Usage: sudo bash linux-optimizer-bootstrap-secure.sh [--dry-run] [--yes] [--with-dns] [--with-timezone] [--timezone TZ] [--help]
+
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -884,8 +896,34 @@ set_timezone() {
 }
 
 # ---------- Secure download & verify ----------
+# Fixed interface: secure_download_and_execute <filename> <download_url> <expected_sha256>
+# - <filename> must be a basename like ubuntu-optimizer.sh (no path, no "--")
+# - <download_url> must be https://...
+# - <expected_sha256> is 64-char hex
+# Callers must use: secure_download_and_execute "$opt_file" "$opt_url" "$opt_sha"
+# The function also tolerates an optional leading "--" (end-of-options) for robustness,
+# but "--" will never be accepted as a filename (fail-closed).
 secure_download_and_execute() {
-  local file="$1" url="$2" expected_sha="$3"
+  # Tolerate optional leading "--" without treating it as filename
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  if [[ $# -lt 3 ]]; then
+    red_msg "secure_download_and_execute: expected 3 args: <filename> <url> <sha256> (got $#)"
+    return 1
+  fi
+  local file="$1"
+  local url="$2"
+  local expected_sha="$3"
+  # Guard: filename must not be "--", empty, or contain path separators
+  if [[ -z "$file" || "$file" == "--" ]]; then
+    red_msg "secure_download_and_execute: invalid filename '$file' (refusing '--')"
+    return 1
+  fi
+  if [[ "$file" == *"/"* ]]; then
+    red_msg "secure_download_and_execute: filename must not contain '/' (got '$file')"
+    return 1
+  fi
   # Create secure temp dir if not exists
   if [[ -z "$TMP_DIR" || ! -d "$TMP_DIR" ]]; then
     TMP_DIR="$(mktemp -d -t linux-optimizer-XXXXXX 2>/dev/null || mktemp -d 2>/dev/null)"
@@ -894,10 +932,10 @@ secure_download_and_execute() {
   fi
   local dest="${TMP_DIR}/${file}"
 
-  yellow_msg "Downloading $file from $BASE_URL (pinned $OPTIMIZER_REF)..."
+  yellow_msg "Downloading $file from $url..."
 
   if is_dry; then
-    yellow_msg "[DRY-RUN] would: curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 -o $dest $url"
+    yellow_msg "[DRY-RUN] would: curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 -o \"$dest\" \"$url\""
     yellow_msg "[DRY-RUN] would verify SHA256 $expected_sha and bash -n, then execute"
     CHANGES_SKIPPED+=("download: dry-run $file")
     return 0
@@ -906,8 +944,8 @@ secure_download_and_execute() {
   # Ensure no HTTP fallback, TLS verification strict
   local curl_ok=0
   if require_cmd curl; then
-    log "RUN: curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 -o $dest $url"
-    if curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 --silent --show-error -o -- "$dest" -- "$url" 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then
+    log "RUN: curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 -o \"$dest\" \"$url\""
+    if curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 60 --retry 2 --silent --show-error -o "$dest" "$url" 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then
       # Verify redirect stayed HTTPS: curl with --proto ensures final URL is https, but double-check via effective url
       local effective; effective="$(curl --proto '=https' --tlsv1.2 --fail --location --connect-timeout 10 --max-time 10 -o /dev/null -w '%{url_effective}' -- "$url" 2>/dev/null || echo "$url")"
       if echo "$effective" | grep -q "^http://"; then
@@ -923,8 +961,8 @@ secure_download_and_execute() {
   fi
   if [[ $curl_ok -eq 0 ]] && require_cmd wget; then
     log "Fallback wget for $url"
-    # wget with HTTPS only
-    if wget --https-only --timeout=15 --tries=3 --no-verbose -O -- "$dest" -- "$url" 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then
+    # wget with HTTPS only — exact construction required
+    if wget --https-only --timeout=60 --tries=3 -O "$dest" "$url" 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then
       # wget doesn't auto-fail on http redirect if original https; check file exists
       curl_ok=1
     fi
@@ -1121,7 +1159,8 @@ main() {
   local opt_url; opt_url="$(echo "$details" | cut -d'|' -f2)"
   local opt_sha; opt_sha="$(echo "$details" | cut -d'|' -f3)"
 
-  if ! secure_download_and_execute -- "$opt_file" "$opt_url" "$opt_sha"; then
+  # Fixed call: secure_download_and_execute <filename> <url> <sha> — no leading "--" as filename
+  if ! secure_download_and_execute "$opt_file" "$opt_url" "$opt_sha"; then
     red_msg "Optimizer download/verify/execute failed for $opt_file — bootstrap preserved backups for rollback"
     print_final_status
     exit 1
