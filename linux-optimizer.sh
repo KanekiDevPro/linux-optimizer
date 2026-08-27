@@ -416,7 +416,7 @@ elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "Fedora Linux" ]]; 
 else
     echo 
     sleep 0.5
-    red_msg "Unknown OS, Create an issue here: https://github.com/hawshemi/Linux-Optimizer"
+    red_msg "Unknown OS, Create an issue here: https://github.com/KanekiDevPro/Linux-Optimizer"
     OS="unknown"
     echo 
     sleep 2
