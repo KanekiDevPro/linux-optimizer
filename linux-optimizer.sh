@@ -18,6 +18,7 @@ IFS=$'\n\t'
 DRY_RUN=0
 ASSUME_YES=0
 WITH_DNS=0
+NO_DNS=0
 WITH_TIMEZONE=0
 EXPLICIT_TZ=""
 SHOW_HELP=0
@@ -31,6 +32,7 @@ while [[ $_idx -lt ${#_argv[@]} ]]; do
     --dry-run) DRY_RUN=1 ;;
     --yes|-y) ASSUME_YES=1 ;;
     --with-dns) WITH_DNS=1 ;;
+    --no-dns) NO_DNS=1 ;;
     --with-timezone) WITH_TIMEZONE=1 ;;
     --timezone=*) EXPLICIT_TZ="${_arg#*=}"; WITH_TIMEZONE=1 ;;
     --timezone)
@@ -47,6 +49,12 @@ while [[ $_idx -lt ${#_argv[@]} ]]; do
 done
 unset _argv _idx _arg _next
 
+# Validate DNS flag conflict
+if [[ $WITH_DNS -eq 1 && ${NO_DNS:-0} -eq 1 ]]; then
+  echo "[*] ----- Error: --with-dns and --no-dns are mutually exclusive" >&2
+  exit 1
+fi
+
 if [[ $SHOW_HELP -eq 1 ]]; then
   cat <<'HELP'
 Usage: sudo bash linux-optimizer-bootstrap-secure.sh [OPTIONS]
@@ -54,11 +62,19 @@ Usage: sudo bash linux-optimizer-bootstrap-secure.sh [OPTIONS]
 Options:
   --dry-run          Preview only — zero system mutation (no file writes, no pkg installs, no downloads executed)
   --yes, -y          Non-interactive: assume yes where confirmation would normally be asked
-  --with-dns         Explicitly enable DNS optimization (default: preserve existing DNS, no changes)
+  --with-dns         Allow DNS repair/recovery (explicit opt-in, also default when DNS is broken)
+  --no-dns           Never modify DNS; fail closed if DNS is unavailable
   --with-timezone    Enable GeoIP timezone detection (default: preserve current timezone)
   --timezone TZ      Set explicit timezone (e.g., --timezone UTC or --timezone Europe/Berlin). Implies --with-timezone.
                      TZ is validated against /usr/share/zoneinfo and timedatectl list-timezones.
   --help, -h         Show this help
+
+DNS Recovery (automatic, OS-aware):
+  Default: test current DNS (resolvectl/getent/dig for raw.githubusercontent.com). If working, preserve existing
+           provider DNS (e.g., 185.12.64.1/185.12.64.2) and do not modify. If broken, automatically recover using
+           native manager: systemd-resolved drop-in, NetworkManager nmcli, netplan drop-in, resolvconf, or
+           static resolv.conf — transactional backup, verify via resolvectl query + getent ahostsv4 + HTTPS, rollback
+           on failure. Use --no-dns to disable auto-recovery (fail-closed), --with-dns to force allow.
 
 Security:
   - Pinned to immutable commit SHA; SHA256 verified before execution (fail-closed)
@@ -70,6 +86,7 @@ Examples:
   sudo bash linux-optimizer-bootstrap-secure.sh --dry-run
   sudo bash linux-optimizer-bootstrap-secure.sh --yes
   sudo bash linux-optimizer-bootstrap-secure.sh --with-dns --yes
+  sudo bash linux-optimizer-bootstrap-secure.sh --no-dns
   sudo bash linux-optimizer-bootstrap-secure.sh --timezone UTC --yes
 
 HELP
@@ -90,6 +107,13 @@ TMP_DIR=""
 OS_ID=""
 OS_VERSION_ID=""
 OS_PRETTY="unknown"
+
+# DNS recovery globals (OS-aware, transactional)
+TARGET_HOST="raw.githubusercontent.com"
+DNS_FALLBACK_CANDIDATES=("1.1.1.1" "1.0.0.1" "8.8.8.8" "8.8.4.4")
+DNS_MANAGER_DETECTED=""
+DNS_RECOVERY_APPLIED=0
+DNS_RECOVERY_BACKUP_DIR=""
 
 # Expected SHA256 — fail-closed if mismatch. Update when OPTIMIZER_REF changes.
 declare -A EXPECTED_SHA256=(
@@ -276,7 +300,8 @@ check_if_running_as_root() {
 
 # ---------- Connectivity ----------
 has_internet() {
-  # Test via HTTPS to GitHub with IP to avoid DNS confusion; fallback to 1.1.1.1
+  # Test 1: hostname HTTPS (requires DNS + TLS). Test 2: IP HTTPS (proves L3, no DNS).
+  # IP success does NOT imply hostname download will succeed (needs DNS + SNI).
   if require_cmd curl; then
     if curl --proto '=https' --tlsv1.2 --fail --silent --connect-timeout 5 --max-time 10 --head "https://raw.githubusercontent.com" >/dev/null 2>&1; then return 0; fi
     if curl --fail --silent --connect-timeout 5 --max-time 10 --head "https://1.1.1.1" >/dev/null 2>&1; then return 0; fi
@@ -422,9 +447,9 @@ check_required_commands() {
 install_dependencies_debian_based() {
   if is_dry; then yellow_msg "[DRY-RUN] would: apt-get update -q && apt-get install -yq wget curl jq (if missing)"; CHANGES_SKIPPED+=("deps: dry-run"); return 0; fi
   if ! require_cmd apt-get; then red_msg "apt-get not found"; return 1; fi
-  # Check connectivity first
+  # Check connectivity first — DNS required for apt hosts, IP alone insufficient for hostname HTTPS
   if ! has_internet; then red_msg "No internet connectivity — cannot install dependencies"; return 1; fi
-  if ! has_dns; then yellow_msg "DNS resolution may be failing — will try IP-based connectivity"; fi
+  if ! has_dns; then yellow_msg "DNS resolution may be failing — IP connectivity (1.1.1.1) may still work, but apt and raw.githubusercontent.com require DNS (TLS SNI) and will fail until DNS is fixed (no automatic IP fallback, no curl -k)"; fi
 
   yellow_msg 'Installing Dependencies (debian)...'
   local pkgs=()
@@ -620,12 +645,37 @@ is_stub_listener_active() {
 }
 
 fix_dns() {
+  # Preserve working DNS — do not replace healthy provider (e.g., 185.12.64.1) with fallback
+  if test_target_hostname -- "$TARGET_HOST" 2>/dev/null; then
+    local _cur_srv; _cur_srv="$(get_current_dns_servers 2>/dev/null || echo "unknown")"
+    if [[ $WITH_DNS -ne 1 ]]; then
+      yellow_msg "DNS optimization skipped (default preserve). Current DNS working (${_cur_srv:-none}) — preserved."
+      CHANGES_SKIPPED+=("dns: preserved working ${_cur_srv:-none}")
+      return 0
+    else
+      yellow_msg "DNS is working (${_cur_srv:-none}) — preserving existing provider DNS, no modification (even with --with-dns)."
+      CHANGES_SKIPPED+=("dns: preserved working ${_cur_srv:-none} (--with-dns)")
+      return 0
+    fi
+  fi
+  # At this point DNS is broken — decide if we are allowed to modify
+  if [[ $WITH_DNS -ne 1 && ${NO_DNS:-0} -eq 0 ]]; then
+    # Default automatic will be handled by state machine in main(), not here; keep fix_dns as no-op for now
+    yellow_msg "DNS is broken — fix_dns with default preserve will delegate to automatic native recovery (state machine). Use --no-dns to disable."
+    # Fall through to allow state machine to handle; fix_dns itself will not blindly edit
+    # For backward compat, if called directly with --with-dns broken, we will run recovery below
+    if [[ $WITH_DNS -ne 1 ]]; then
+      # Default case: let state machine handle it — return success to let main continue to state machine
+      CHANGES_SKIPPED+=("dns: broken, delegating to state machine")
+      return 0
+    fi
+  fi
   if [[ $WITH_DNS -ne 1 ]]; then
-    yellow_msg "DNS optimization skipped (default preserve). Use --with-dns to enable. Current DNS preserved."
+    yellow_msg "DNS optimization skipped (default preserve). Current DNS preserved."
     CHANGES_SKIPPED+=("dns: skipped (use --with-dns)")
     return 0
   fi
-  yellow_msg "DNS optimization requested (--with-dns)"
+  yellow_msg "DNS optimization requested (--with-dns) and current DNS is broken — native recovery will be attempted"
   # Detect manager
   local mgr; mgr="$(detect_dns_manager 2>/dev/null || echo "regular-file")"
   log "DNS manager detection: $mgr"
@@ -757,6 +807,544 @@ EOF
   green_msg "DNS Fixed (added ${to_add[*]}, preserved existing ${existing[*]}, reversible via $BACKUP_DIR)"
   CHANGES_DONE+=("dns: added ${to_add[*]}")
   commit_transaction
+}
+
+# ---------- DNS Recovery Helpers (OS-aware, native, transactional) ----------
+get_current_resolver_target() {
+  if [[ -L "$DNS_PATH" ]]; then
+    readlink -f -- "$DNS_PATH" 2>/dev/null || readlink -- "$DNS_PATH" 2>/dev/null || echo "symlink-unknown"
+  else
+    echo "regular-file"
+  fi
+}
+
+get_current_dns_servers() {
+  local servers=()
+  # Try resolvectl first (systemd-resolved)
+  if require_cmd resolvectl && resolvectl status 2>/dev/null | grep -q "DNS Servers"; then
+    while IFS= read -r line; do
+      # line like "  DNS Servers: 185.12.64.1 185.12.64.2"
+      for token in $line; do
+        if [[ "$token" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || [[ "$token" =~ ^[0-9a-fA-F:]+$ ]]; then
+          servers+=("$token")
+        fi
+      done
+    done < <(resolvectl status 2>/dev/null | grep "DNS Servers" || true)
+  fi
+  # Fallback: parse /etc/resolv.conf nameservers
+  if [[ ${#servers[@]} -eq 0 && -f "$DNS_PATH" ]]; then
+    while IFS= read -r line; do
+      if echo "$line" | grep -Eq '^[[:space:]]*nameserver[[:space:]]+'; then
+        local ns; ns="$(echo "$line" | awk '{print $2}' | tr -d '\r')"
+        [[ -n "$ns" ]] && servers+=("$ns")
+      fi
+    done < "$DNS_PATH" 2>/dev/null || true
+  fi
+  # Deduplicate
+  if [[ ${#servers[@]} -gt 0 ]]; then
+    printf "%s\n" "${servers[@]}" | sort -u | tr '\n' ' ' | xargs 2>/dev/null || echo "${servers[*]}"
+  else
+    echo ""
+  fi
+}
+
+# Read-only DNS tests — do not modify
+test_dns_resolvectl_query() {
+  local host="${1:-$TARGET_HOST}"
+  if require_cmd resolvectl; then
+    if timeout 5 resolvectl query -- "$host" >/dev/null 2>&1; then return 0; fi
+    # Older resolvectl without query: try resolve
+    if timeout 5 resolvectl query "$host" 2>&1 | grep -q "Address:"; then return 0; fi
+  fi
+  return 1
+}
+test_dns_getent_ahostsv4() {
+  local host="${1:-$TARGET_HOST}"
+  if require_cmd getent; then
+    if timeout 4 getent ahostsv4 -- "$host" >/dev/null 2>&1; then return 0; fi
+    if timeout 4 getent ahosts -- "$host" >/dev/null 2>&1; then return 0; fi
+    if timeout 4 getent hosts -- "$host" >/dev/null 2>&1; then return 0; fi
+  fi
+  return 1
+}
+test_dns_dig() {
+  local host="${1:-$TARGET_HOST}"
+  if require_cmd dig; then
+    if timeout 5 dig +time=2 +tries=1 -- "$host" +short >/dev/null 2>&1 && timeout 5 dig +time=2 +tries=1 -- "$host" +short 2>/dev/null | grep -Eq '[0-9.]+'; then return 0; fi
+  fi
+  return 1
+}
+test_target_hostname() {
+  # Multiple read-only tests, succeed if any passes
+  local host="${1:-$TARGET_HOST}"
+  if test_dns_resolvectl_query -- "$host"; then log "DNS test resolvectl query $host: PASS"; return 0; fi
+  if test_dns_getent_ahostsv4 -- "$host"; then log "DNS test getent ahostsv4 $host: PASS"; return 0; fi
+  if test_dns_dig -- "$host"; then log "DNS test dig $host: PASS"; return 0; fi
+  # Fallback: getent hosts
+  if require_cmd getent && timeout 4 getent hosts -- "$host" >/dev/null 2>&1; then log "DNS test getent hosts $host: PASS"; return 0; fi
+  log "DNS test $host: FAIL (all methods)"
+  return 1
+}
+test_dns_server_candidate() {
+  local server="$1" host="${2:-$TARGET_HOST}"
+  if [[ -z "$server" ]]; then return 1; fi
+  # Test reachability first (bounded)
+  if ! timeout 2 bash -c "exec 3<>/dev/tcp/$server/53" 2>/dev/null; then
+    # UDP 53 may not accept TCP, try dig anyway
+    :
+  fi
+  if require_cmd dig; then
+    if timeout 4 dig +time=2 +tries=1 "@$server" -- "$host" +short 2>/dev/null | grep -Eq '[0-9.]+'; then return 0; fi
+  elif require_cmd drill; then
+    if timeout 4 drill "@$server" -- "$host" 2>/dev/null | grep -Eq '[0-9.]+'; then return 0; fi
+  elif require_cmd host; then
+    if timeout 4 host -- "$host" "$server" >/dev/null 2>&1; then return 0; fi
+  elif require_cmd nslookup; then
+    if timeout 4 nslookup -- "$host" "$server" >/dev/null 2>&1; then return 0; fi
+  else
+    # No per-server query tool, try generic getent with timeout but cannot test candidate isolation
+    return 1
+  fi
+  return 1
+}
+test_dns_verify_https() {
+  local url="${1:-https://$TARGET_HOST}"
+  if require_cmd curl; then
+    if curl --proto '=https' --tlsv1.2 --fail --silent --connect-timeout 5 --max-time 10 --head -- "$url" >/dev/null 2>&1; then return 0; fi
+  fi
+  if require_cmd wget; then
+    if wget --https-only --timeout=10 --tries=1 --spider -q -- "$url" 2>/dev/null; then return 0; fi
+  fi
+  return 1
+}
+
+detect_dns_manager_enhanced() {
+  # Priority: systemd-resolved > NetworkManager > netplan > resolvconf > static
+  local mgr="static"
+  local detail=""
+  # Check systemd-resolved
+  if require_cmd systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    mgr="systemd-resolved"
+    detail="active"
+  elif [[ -L "$DNS_PATH" ]] && readlink -f -- "$DNS_PATH" 2>/dev/null | grep -q "systemd/resolve"; then
+    mgr="systemd-resolved"
+    detail="symlink"
+  elif require_cmd resolvectl && resolvectl status >/dev/null 2>&1; then
+    mgr="systemd-resolved"
+    detail="resolvectl"
+  fi
+  if [[ "$mgr" == "systemd-resolved" ]]; then echo "$mgr:$detail"; return 0; fi
+  # NetworkManager
+  if require_cmd nmcli && nmcli general status >/dev/null 2>&1; then
+    if systemctl is-active --quiet NetworkManager 2>/dev/null || nmcli device status >/dev/null 2>&1; then
+      # Check if any connection is managed
+      if nmcli -t -f STATE general 2>/dev/null | grep -q connected; then echo "NetworkManager:active"; return 0; fi
+      # Even if not connected, NM present
+      echo "NetworkManager:present"; return 0
+    fi
+  fi
+  # netplan
+  if [[ -d /etc/netplan ]] && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
+    if require_cmd netplan && netplan status >/dev/null 2>&1; then echo "netplan:active"; return 0; fi
+    echo "netplan:present"; return 0
+  fi
+  # resolvconf
+  if require_cmd resolvconf || [[ -d /etc/resolvconf ]]; then
+    if grep -q "resolvconf" -- "$DNS_PATH" 2>/dev/null; then echo "resolvconf:managed"; return 0; fi
+    echo "resolvconf:present"; return 0
+  fi
+  # Check static vs other
+  if [[ -L "$DNS_PATH" ]]; then
+    local tgt; tgt="$(get_current_resolver_target)"
+    echo "static:symlink->$tgt"; return 0
+  fi
+  echo "static:regular-file"; return 0
+}
+
+dns_diagnostics_report() {
+  yellow_msg "=== DNS Diagnostics ==="
+  local resolver_target; resolver_target="$(get_current_resolver_target)"
+  local dns_servers; dns_servers="$(get_current_dns_servers)"
+  local mgr; mgr="$(detect_dns_manager_enhanced 2>/dev/null || echo "unknown")"
+  DNS_MANAGER_DETECTED="$mgr"
+  log "DNS diag: resolver_target=$resolver_target"
+  log "DNS diag: manager=$mgr"
+  log "DNS diag: servers=${dns_servers:-none}"
+  log "DNS diag: target=$TARGET_HOST"
+  echo "  Resolver: $resolver_target"
+  echo "  Manager: $mgr"
+  echo "  Servers: ${dns_servers:-none}"
+  echo "  Target: $TARGET_HOST"
+  # Test current DNS
+  local test_ok=0
+  if test_target_hostname -- "$TARGET_HOST"; then test_ok=1; yellow_msg "Current DNS: WORKING (target resolves)"; else red_msg "Current DNS: BROKEN (target does not resolve)"; fi
+  # Also test raw specifically
+  if test_dns_resolvectl_query -- "$TARGET_HOST"; then log "resolvectl query $TARGET_HOST PASS"; else log "resolvectl query $TARGET_HOST FAIL"; fi
+  if test_dns_getent_ahostsv4 -- "$TARGET_HOST"; then log "getent ahostsv4 $TARGET_HOST PASS"; else log "getent ahostsv4 $TARGET_HOST FAIL"; fi
+  if require_cmd dig && dig +short -- "$TARGET_HOST" 2>/dev/null | head -1 | grep -Eq '[0-9.]+'; then log "dig $TARGET_HOST PASS"; else log "dig $TARGET_HOST FAIL"; fi
+  # HTTPS test
+  if test_dns_verify_https "https://$TARGET_HOST"; then log "HTTPS https://$TARGET_HOST PASS"; else log "HTTPS https://$TARGET_HOST FAIL"; fi
+  return $test_ok
+}
+
+dns_select_fallback() {
+  # Test fallback candidates with bounded timeout, return first working or empty
+  local host="${1:-$TARGET_HOST}"
+  local tried=()
+  for cand in "${DNS_FALLBACK_CANDIDATES[@]}"; do
+    tried+=("$cand")
+    yellow_msg "Testing fallback DNS $cand for $host (timeout 3s)..."
+    if test_dns_server_candidate -- "$cand" -- "$host"; then
+      green_msg "Fallback DNS $cand: REACHABLE"
+      log "Fallback candidate $cand PASS"
+      echo "$cand"
+      return 0
+    else
+      yellow_msg "Fallback DNS $cand: unreachable"
+      log "Fallback candidate $cand FAIL"
+    fi
+  done
+  # Also test via HTTPS if dig not available but curl to IP might hint? Do not assume, return empty
+  log "All fallback candidates failed: ${tried[*]}"
+  return 1
+}
+
+# Transactional apply helpers — each must backup before modification and verify after
+dns_apply_systemd_resolved() {
+  local dns_list="$1" # space-separated "1.1.1.1 8.8.8.8"
+  if is_dry; then yellow_msg "[DRY-RUN] would create /etc/systemd/resolved.conf.d/99-linux-optimizer-dns.conf DNS=$dns_list and restart systemd-resolved"; return 0; fi
+  local dropin_dir="/etc/systemd/resolved.conf.d"
+  local dropin_file="${dropin_dir}/99-linux-optimizer-dns.conf"
+  begin_transaction
+  if [[ -f "$dropin_file" ]]; then tx_backup_file -- "$dropin_file" || { do_rollback; return 1; }
+  else TX_ACTIONS+=("delete|$dropin_file|"); fi
+  # Also backup audit copy of resolv.conf
+  if [[ -f "$DNS_PATH" ]]; then mkdir -p -- "$BACKUP_DIR" 2>/dev/null || true; cp -a -- "$DNS_PATH" "${BACKUP_DIR}/resolv.conf.audit.bak" 2>/dev/null || true; fi
+  mkdir -p -- "$dropin_dir" 2>/dev/null || { red_msg "Failed to create $dropin_dir"; do_rollback; return 1; }
+  cat > "$dropin_file" <<EOF
+# Generated by linux-optimizer-bootstrap $SCRIPT_VERSION $TRANSACTION_ID
+# Native systemd-resolved recovery — preserves provider if working, else fallback $dns_list
+# Reversible via $BACKUP_DIR — do not edit manually
+[Resolve]
+DNS=$dns_list
+FallbackDNS=1.1.1.1 8.8.8.8
+Domains=~.
+EOF
+  chmod 644 -- "$dropin_file" 2>/dev/null || true
+  log "Wrote $dropin_file DNS=$dns_list"
+  # Verify syntax
+  if require_cmd systemd-analyze && ! systemd-analyze verify "$dropin_file" 2>/dev/null; then yellow_msg "systemd-analyze verify warning (ignored)"; fi
+  # Reload/restart safely
+  if require_cmd systemctl; then
+    # Prefer restart, fallback to reload
+    if ! systemctl restart systemd-resolved 2>/dev/null; then
+      yellow_msg "systemd-resolved restart failed, trying reload"
+      systemctl reload systemd-resolved 2>/dev/null || true
+    fi
+    sleep 1
+    if ! systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+      red_msg "systemd-resolved not active after recovery — rolling back"
+      do_rollback
+      systemctl restart systemd-resolved 2>/dev/null || true
+      return 1
+    fi
+  fi
+  DNS_RECOVERY_APPLIED=1
+  DNS_RECOVERY_BACKUP_DIR="$BACKUP_DIR"
+  # Verify via state machine next steps — caller will verify target + HTTPS
+  commit_transaction
+  return 0
+}
+
+dns_apply_networkmanager() {
+  local dns_list_csv="$1" # comma-separated for nmcli
+  if is_dry; then yellow_msg "[DRY-RUN] would nmcli con mod <active> ipv4.dns $dns_list_csv and reload"; return 0; fi
+  if ! require_cmd nmcli; then red_msg "nmcli not found"; return 1; fi
+  local conn; conn="$(nmcli -t -f NAME,STATE con show --active 2>/dev/null | grep ':activated' | head -1 | cut -d: -f1 || true)"
+  if [[ -z "$conn" ]]; then conn="$(nmcli -t -f NAME con show 2>/dev/null | head -1 || true)"; fi
+  if [[ -z "$conn" ]]; then red_msg "No NetworkManager connection found"; return 1; fi
+  yellow_msg "NetworkManager active connection: $conn"
+  # Backup via nmcli export and file copy
+  begin_transaction
+  # Backup connection file if exists
+  local nm_file; nm_file="$(grep -l "id=$conn" /etc/NetworkManager/system-connections/*.nmconnection 2>/dev/null | head -1 || true)"
+  if [[ -n "$nm_file" && -f "$nm_file" ]]; then tx_backup_file -- "$nm_file" || { do_rollback; return 1; }
+  else
+    # Record current dns via nmcli for rollback
+    local cur_dns; cur_dns="$(nmcli -t -f ipv4.dns con show "$conn" 2>/dev/null | cut -d: -f2 || true)"
+    log "NM current dns for $conn: ${cur_dns:-none}"
+    # Register rollback via nmcli (we will restore via TX delete + manual restore on rollback if needed)
+    # Use transaction to note we need to restore dns_list on rollback — we handle via explicit rollback step
+    TX_ACTIONS+=("nm-restore|$conn|$cur_dns")
+  fi
+  # Apply
+  if ! nmcli con mod "$conn" ipv4.dns "$dns_list_csv" 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then red_msg "nmcli con mod failed"; do_rollback; return 1; fi
+  # Also set to ignore auto DNS if needed, but preserve existing behavior: do not blindly overwrite, only set dns
+  # Reload
+  if ! nmcli con up "$conn" 2>/dev/null; then
+    yellow_msg "nmcli con up $conn failed, trying reload"
+    nmcli general reload 2>/dev/null || true
+    # Try to bring up again
+    nmcli con up "$conn" 2>/dev/null || true
+  fi
+  sleep 2
+  DNS_RECOVERY_APPLIED=1
+  DNS_RECOVERY_BACKUP_DIR="$BACKUP_DIR"
+  commit_transaction
+  return 0
+}
+
+dns_apply_netplan() {
+  local dns_list="$1" # space-separated
+  if is_dry; then yellow_msg "[DRY-RUN] would create /etc/netplan/99-linux-optimizer.yaml for $dns_list and netplan try/apply"; return 0; fi
+  local iface; iface="$(ip route 2>/dev/null | grep '^default' | awk '{print $5}' | head -1 || true)"
+  if [[ -z "$iface" ]]; then iface="eth0"; yellow_msg "Could not detect default iface, using $iface"; fi
+  local dropin="/etc/netplan/99-linux-optimizer.yaml"
+  begin_transaction
+  if [[ -f "$dropin" ]]; then tx_backup_file -- "$dropin" || { do_rollback; return 1; }
+  else TX_ACTIONS+=("delete|$dropin|"); fi
+  # Backup existing yamls audit
+  mkdir -p -- "$BACKUP_DIR" 2>/dev/null || true
+  cp -a /etc/netplan/*.yaml "$BACKUP_DIR"/ 2>/dev/null || true
+  # Create minimal drop-in — netplan merges, does not overwrite whole file
+  local dns_yaml; dns_yaml="$(echo "$dns_list" | tr ' ' ',' | sed 's/,/, /g')"
+  # Use addresses as list: [1.1.1.1, 8.8.8.8]
+  local addr_list; addr_list="$(echo "$dns_list" | awk '{for(i=1;i<=NF;i++) printf "%s%s", (i>1?", ":""), "\""$i"\"";}')"
+  # Actually yaml expects: addresses: [1.1.1.1, 8.8.8.8]
+  addr_list="[$(echo "$dns_list" | tr ' ' ',' )]"
+  cat > "$dropin" <<EOF
+# Generated by linux-optimizer-bootstrap $SCRIPT_VERSION $TRANSACTION_ID
+# Minimal netplan drop-in — merges with existing, does not rewrite whole YAML
+# Reversible via $BACKUP_DIR
+network:
+  version: 2
+  ethernets:
+    $iface:
+      nameservers:
+        addresses: $addr_list
+EOF
+  chmod 644 -- "$dropin" 2>/dev/null || true
+  log "Wrote $dropin for $iface DNS $dns_list"
+  # Validate
+  if require_cmd netplan; then
+    if ! netplan generate 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then red_msg "netplan generate failed"; do_rollback; return 1; fi
+    # Use try where appropriate (timeout 10) to avoid lockout — but try requires tty, fallback to apply
+    if [[ -t 1 ]] && netplan try --timeout 10 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then log "netplan try succeeded"; else
+      yellow_msg "netplan try not available or failed, using netplan apply"
+      if ! netplan apply 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then red_msg "netplan apply failed"; do_rollback; return 1; fi
+    fi
+  else
+    red_msg "netplan not found"; do_rollback; return 1
+  fi
+  sleep 2
+  DNS_RECOVERY_APPLIED=1
+  DNS_RECOVERY_BACKUP_DIR="$BACKUP_DIR"
+  commit_transaction
+  return 0
+}
+
+dns_apply_resolvconf() {
+  local dns_list="$1"
+  if is_dry; then yellow_msg "[DRY-RUN] would resolvconf -a lo.linux-optimizer with $dns_list"; return 0; fi
+  begin_transaction
+  # resolvconf native: create tail or base
+  local tail="/etc/resolvconf/resolv.conf.d/tail"
+  if [[ -f "$tail" ]]; then tx_backup_file -- "$tail" || { do_rollback; return 1; }
+  else TX_ACTIONS+=("delete|$tail|"); mkdir -p -- "$(dirname -- "$tail")" 2>/dev/null || true; fi
+  for ns in $dns_list; do echo "nameserver $ns"; done > "$tail" 2>/dev/null || { red_msg "Failed to write $tail"; do_rollback; return 1; }
+  chmod 644 -- "$tail" 2>/dev/null || true
+  if require_cmd resolvconf; then
+    if ! resolvconf --enable-updates 2>/dev/null; then true; fi
+    # Force update
+    resolvconf -u 2>/dev/null || true
+  fi
+  sleep 1
+  DNS_RECOVERY_APPLIED=1
+  DNS_RECOVERY_BACKUP_DIR="$BACKUP_DIR"
+  commit_transaction
+  return 0
+}
+
+dns_apply_static() {
+  local dns_list="$1"
+  if is_dry; then yellow_msg "[DRY-RUN] would backup $DNS_PATH and write minimal static resolv.conf with $dns_list"; return 0; fi
+  # Only if genuinely unmanaged: not a symlink to systemd/resolve
+  if [[ -L "$DNS_PATH" ]] && readlink -f -- "$DNS_PATH" 2>/dev/null | grep -q "systemd/resolve"; then
+    red_msg "Refusing to overwrite systemd-resolved symlink $DNS_PATH with static file"
+    return 1
+  fi
+  begin_transaction
+  if ! tx_backup_file -- "$DNS_PATH"; then do_rollback; return 1; fi
+  : > "$DNS_PATH" 2>/dev/null || { red_msg "Failed to truncate $DNS_PATH"; do_rollback; return 1; }
+  for ns in $dns_list; do echo "nameserver $ns" >> "$DNS_PATH" 2>/dev/null || { red_msg "Failed to write $DNS_PATH"; do_rollback; return 1; }; done
+  chmod 644 -- "$DNS_PATH" 2>/dev/null || true
+  log "Wrote static $DNS_PATH with $dns_list"
+  DNS_RECOVERY_APPLIED=1
+  DNS_RECOVERY_BACKUP_DIR="$BACKUP_DIR"
+  commit_transaction
+  return 0
+}
+
+# Enhanced rollback to handle nm-restore
+do_rollback_enhanced() {
+  # Call original do_rollback then handle nm-restore entries
+  local has_nm=0
+  for entry in "${TX_ACTIONS[@]:-}"; do if [[ "$entry" == nm-restore\|* ]]; then has_nm=1; break; fi; done
+  do_rollback
+  if [[ $has_nm -eq 1 ]]; then
+    for entry in "${TX_ACTIONS[@]:-}"; do
+      if [[ "$entry" == nm-restore\|* ]]; then
+        local rest="${entry#nm-restore|}"; local conn="${rest%%|*}"; local cur="${rest#*|}"
+        if [[ -n "$conn" ]]; then
+          if is_dry; then yellow_msg "[DRY-ROLLBACK] would nmcli con mod $conn ipv4.dns $cur"
+          else nmcli con mod "$conn" ipv4.dns "$cur" 2>/dev/null || true; nmcli con up "$conn" 2>/dev/null || true; log "Rollback NM $conn dns $cur"; fi
+        fi
+      fi
+    done
+  fi
+}
+
+dns_recovery_state_machine() {
+  # State machine: CHECK_CURRENT_DNS -> TEST_TARGET_HOSTNAME -> DETECT -> TEST_PROVIDER -> SELECT_FALLBACK -> APPLY -> RELOAD -> VERIFY -> HTTPS -> CONTINUE
+  # Returns 0 if DNS working (preserved or recovered), 1 if failed (rolled back, fail-closed)
+  local start_ts; start_ts="$(date -Is 2>/dev/null || date)"
+  yellow_msg "=== DNS Recovery State Machine $start_ts ==="
+  local resolver_target; resolver_target="$(get_current_resolver_target)"
+  local current_servers; current_servers="$(get_current_dns_servers)"
+  local mgr; mgr="$(detect_dns_manager_enhanced 2>/dev/null || echo "static:unknown")"
+  DNS_MANAGER_DETECTED="$mgr"
+  log "DNS SM: resolver=$resolver_target manager=$mgr servers=${current_servers:-none} target=$TARGET_HOST"
+  echo "  Resolver: $resolver_target"
+  echo "  Manager: $mgr"
+  echo "  Current DNS: ${current_servers:-none}"
+  echo "  Target: $TARGET_HOST"
+  echo "  Backup root: $BACKUP_ROOT/$TRANSACTION_ID"
+  log "DNS SM: CHECK_CURRENT_DNS"
+  # Extensive diagnostics (read-only, no mutation)
+  if test_target_hostname -- "$TARGET_HOST"; then
+    green_msg "CHECK_CURRENT_DNS: PASS — current DNS resolves $TARGET_HOST, preserving existing configuration (e.g., ${current_servers:-preserved})"
+    log "DNS SM: current DNS working, no recovery needed"
+    CHANGES_SKIPPED+=("dns: preserved working ${current_servers:-none}")
+    return 0
+  fi
+  red_msg "CHECK_CURRENT_DNS: FAIL — $TARGET_HOST does not resolve"
+  log "DNS SM: TEST_TARGET_HOSTNAME FAIL"
+  # If --no-dns, fail closed without modification
+  if [[ ${NO_DNS:-0} -eq 1 ]]; then
+    red_msg "DNS is broken and --no-dns is set — refusing to modify DNS (fail-closed). Fix /etc/resolv.conf manually to contain nameserver 1.1.1.1 or re-run without --no-dns."
+    FAILURES+=("dns: broken, --no-dns fail-closed")
+    return 1
+  fi
+  # --with-dns explicitly allows, default also allows automatic safe recovery (per new spec). No additional confirm needed unless not --yes?
+  # For safety, if not --yes and DNS broken, ask? But automatic per spec: default should recover. We log and proceed.
+  yellow_msg "DNS is broken — automatic native recovery will be attempted (manager: $mgr). Use --no-dns to disable."
+  log "DNS SM: DETECT_DNS_MANAGER $mgr"
+  # TEST_PROVIDER_DNS — test currently configured servers directly
+  local provider_works=""
+  for srv in $current_servers; do
+    if [[ "$srv" == "127.0.0.53" ]] || [[ "$srv" == "127.0.0.1" ]]; then continue; fi # skip stubs for provider test
+    yellow_msg "Testing provider DNS $srv for $TARGET_HOST..."
+    if test_dns_server_candidate -- "$srv" -- "$TARGET_HOST"; then
+      provider_works="$srv"
+      green_msg "Provider DNS $srv: WORKING — will preserve provider"
+      log "Provider $srv PASS"
+      break
+    else
+      yellow_msg "Provider DNS $srv: unreachable"
+      log "Provider $srv FAIL"
+    fi
+  done
+  local selected=""
+  if [[ -n "$provider_works" ]]; then
+    # Preserve provider — use the working provider(s) as recovery list
+    # Collect all working providers
+    selected="$provider_works"
+    # Try to include other provider servers that also work
+    for srv in $current_servers; do
+      if [[ "$srv" == "$provider_works" ]] || [[ "$srv" == "127.0.0.53" ]] || [[ "$srv" == "127.0.0.1" ]]; then continue; fi
+      if test_dns_server_candidate -- "$srv" -- "$TARGET_HOST"; then selected+=" $srv"; fi
+    done
+    yellow_msg "SELECT_FALLBACK: preserving working provider DNS $selected"
+  else
+    yellow_msg "Current provider DNS unavailable — selecting fallback from ${DNS_FALLBACK_CANDIDATES[*]}"
+    for cand in "${DNS_FALLBACK_CANDIDATES[@]}"; do
+      if test_dns_server_candidate -- "$cand" -- "$TARGET_HOST"; then selected="$cand"; break; fi
+    done
+    # If no single candidate answers via dig but we have IP connectivity, still pick 1.1.1.1 as best effort and let verify stage decide
+    if [[ -z "$selected" ]]; then
+      # Check if any candidate is reachable on 53/tcp or via curl IP test as hint
+      for cand in "${DNS_FALLBACK_CANDIDATES[@]}"; do
+        if timeout 2 bash -c "exec 3<>/dev/tcp/$cand/53" 2>/dev/null; then selected="$cand"; yellow_msg "Fallback $cand TCP/53 reachable (no dig), selecting as best-effort"; break; fi
+      done
+    fi
+    if [[ -z "$selected" ]]; then selected="1.1.1.1"; yellow_msg "No fallback responded to probe, defaulting to $selected (verify will confirm)"; fi
+    # For robustness, use two fallbacks if possible
+    if [[ "$selected" == "1.1.1.1" ]]; then
+      # Try to add second
+      for cand in "${DNS_FALLBACK_CANDIDATES[@]}"; do
+        if [[ "$cand" == "$selected" ]]; then continue; fi
+        if test_dns_server_candidate -- "$cand" -- "$TARGET_HOST"; then selected+=" $cand"; break; fi
+      done
+      # Ensure at least 1.1.1.1 + 8.8.8.8 if second not found but 8.8.8.8 TCP reachable
+      if [[ "$selected" == "1.1.1.1" ]] && timeout 2 bash -c "exec 3<>/dev/tcp/8.8.8.8/53" 2>/dev/null; then selected+=" 8.8.8.8"; fi
+    fi
+    yellow_msg "SELECT_FALLBACK: $selected"
+    log "DNS SM: SELECT_FALLBACK $selected"
+  fi
+  # APPLY via native manager
+  yellow_msg "APPLY_NATIVE_CONFIGURATION via $mgr with DNS $selected"
+  log "DNS SM: APPLY $mgr $selected"
+  local apply_rc=0
+  case "$mgr" in
+    systemd-resolved*) dns_apply_systemd_resolved -- "$selected" || apply_rc=$? ;;
+    NetworkManager*) 
+      local csv; csv="$(echo "$selected" | tr ' ' ',')"
+      dns_apply_networkmanager -- "$csv" || apply_rc=$?
+      ;;
+    netplan*) dns_apply_netplan -- "$selected" || apply_rc=$? ;;
+    resolvconf*) dns_apply_resolvconf -- "$selected" || apply_rc=$? ;;
+    static*) dns_apply_static -- "$selected" || apply_rc=$? ;;
+    *) 
+      red_msg "Unknown DNS manager $mgr — refusing to blindly overwrite /etc/resolv.conf. Fail-closed."
+      log "DNS SM: unknown manager fail-closed"
+      return 1
+      ;;
+  esac
+  if [[ $apply_rc -ne 0 ]]; then
+    red_msg "APPLY_NATIVE_CONFIGURATION failed (rc $apply_rc) — rolling back"
+    do_rollback
+    FAILURES+=("dns: apply $mgr failed")
+    return 1
+  fi
+  # VERIFY_TARGET_DNS
+  yellow_msg "VERIFY_TARGET_DNS for $TARGET_HOST ..."
+  sleep 1
+  local verify_ok=0
+  if test_dns_resolvectl_query -- "$TARGET_HOST"; then log "VERIFY resolvectl query PASS"; verify_ok=1; else log "VERIFY resolvectl query FAIL"; fi
+  if test_dns_getent_ahostsv4 -- "$TARGET_HOST"; then log "VERIFY getent ahostsv4 PASS"; verify_ok=1; else log "VERIFY getent ahostsv4 FAIL"; fi
+  # Also test raw specifically
+  if test_target_hostname -- "$TARGET_HOST"; then verify_ok=1; fi
+  if [[ $verify_ok -eq 0 ]]; then
+    red_msg "VERIFY_TARGET_DNS FAILED — $TARGET_HOST still does not resolve after recovery (manager $mgr, DNS $selected). Rolling back."
+    do_rollback
+    # Try to restart original resolver if we broke it
+    if [[ "$mgr" == systemd-resolved* ]] && require_cmd systemctl; then systemctl restart systemd-resolved 2>/dev/null || true; fi
+    FAILURES+=("dns: verify target failed")
+    return 1
+  fi
+  green_msg "VERIFY_TARGET_DNS PASS"
+  # VERIFY_HTTPS
+  yellow_msg "VERIFY_HTTPS https://$TARGET_HOST ..."
+  if ! test_dns_verify_https "https://$TARGET_HOST"; then
+    red_msg "VERIFY_HTTPS FAILED — https://$TARGET_HOST not reachable after DNS fix. Rolling back."
+    do_rollback
+    FAILURES+=("dns: verify https failed")
+    return 1
+  fi
+  green_msg "VERIFY_HTTPS PASS — DNS recovery successful (manager $mgr, DNS $selected, backup $BACKUP_DIR)"
+  CHANGES_DONE+=("dns: recovered $mgr $selected")
+  log "DNS SM: recovery SUCCESS"
+  return 0
 }
 
 # ---------- Timezone ----------
@@ -1098,14 +1686,28 @@ main() {
   detect_os
   validate_os_version
 
-  # Connectivity check (non-fatal but warn)
+  # Connectivity check — DNS-aware, no misleading IP fallback
+  # Test current DNS FIRST (read-only, does not modify)
+  local _dns_target_ok=0
+  if test_target_hostname -- "$TARGET_HOST" 2>/dev/null; then _dns_target_ok=1; fi
   if ! has_internet; then
     yellow_msg "Internet connectivity test failed — package installs/downloads may fail"
-    log "Connectivity: no internet (curl head failed)"
-    if has_dns; then log "DNS still works, but HTTP failed"; else log "DNS also failing — likely offline"; fi
+    log "Connectivity: no internet (curl head failed) dns_target_ok=$_dns_target_ok"
+    if has_dns; then log "DNS still works, but HTTP to IP failed (possible firewall)"; else log "DNS and HTTP both failing — likely offline"; fi
   else
-    green_msg "Internet connectivity OK"
-    if ! has_dns; then yellow_msg "DNS resolution test failed, but HTTP to IP works — DNS may be broken"; fi
+    if [[ $_dns_target_ok -eq 1 ]]; then
+      green_msg "Internet connectivity OK (DNS working, $TARGET_HOST resolves)"
+      log "Connectivity: internet OK, dns OK"
+    else
+      yellow_msg "IP connectivity OK (https://1.1.1.1 reachable) but DNS resolution for $TARGET_HOST failed — DNS is broken, IP fallback cannot fetch hostname-based HTTPS (TLS SNI requires DNS)"
+      log "Connectivity: IP OK but DNS for $TARGET_HOST FAIL — hostname HTTPS will fail"
+    fi
+  fi
+  unset _dns_target_ok
+  # Run full DNS diagnostics (read-only) and preserve working provider DNS
+  # This is the user VPS case: 185.12.64.1/185.12.64.2 working → will be preserved, no modification
+  if ! dns_diagnostics_report 2>&1 | tee -a -- "$LOG_FILE" 2>/dev/null; then
+    yellow_msg "DNS diagnostics: current DNS appears broken"
   fi
 
   # Install dependencies per OS
@@ -1146,6 +1748,34 @@ main() {
     red_msg "Timezone handling failed"
     print_final_status
     exit 1
+  fi
+
+  # DNS recovery state machine — ensure TARGET_HOST resolves before HTTPS download (fail-closed, no blind IP fallback)
+  if ! test_target_hostname -- "$TARGET_HOST" 2>/dev/null; then
+    yellow_msg "DNS for $TARGET_HOST is broken — attempting native recovery (manager: $(detect_dns_manager_enhanced 2>/dev/null || echo unknown))"
+    if [[ ${NO_DNS:-0} -eq 1 ]]; then
+      red_msg "DNS is broken and --no-dns is set — fail-closed before download. Restore /etc/resolv.conf to contain 'nameserver 1.1.1.1' or re-run without --no-dns / with --with-dns."
+      FAILURES+=("dns: broken, --no-dns fail-closed")
+      print_final_status; exit 1
+    fi
+    # Default automatic recovery (or --with-dns explicit) — uses native manager, transactional, verified
+    if ! dns_recovery_state_machine; then
+      red_msg "DNS recovery failed — cannot download https://$TARGET_HOST. Fail-closed, optimizer not executed (no TLS bypass, no hard-coded IP)."
+      print_final_status; exit 1
+    fi
+    if ! test_target_hostname -- "$TARGET_HOST" 2>/dev/null; then
+      red_msg "DNS still broken after recovery — fail-closed"
+      FAILURES+=("dns: still broken after recovery")
+      print_final_status; exit 1
+    fi
+  else
+    green_msg "DNS for $TARGET_HOST: WORKING — preserving existing provider DNS, no recovery needed"
+    log "DNS for $TARGET_HOST working, preserved"
+  fi
+  if ! test_dns_verify_https "https://$TARGET_HOST" 2>/dev/null; then
+    red_msg "HTTPS to https://$TARGET_HOST not reachable (DNS may be broken or firewall). Fail-closed before download — verify with: resolvectl query $TARGET_HOST; getent ahostsv4 $TARGET_HOST; curl -4 --connect-timeout 5 https://1.1.1.1"
+    FAILURES+=("dns: https verify failed")
+    print_final_status; exit 1
   fi
 
   # Download & execute optimizer for this OS
