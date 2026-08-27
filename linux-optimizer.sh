@@ -26,7 +26,6 @@ red_msg() {
 
 # Paths
 HOST_PATH="/etc/hosts"
-DNS_PATH="/etc/resolv.conf"
 
 
 # Intro
@@ -142,6 +141,13 @@ NM_CHANGES=()                # entries: "name|dev|old_dns4|old_ign4|old_dns6|old
 NM_APPLIED=0
 NM_DNSNONE_DROPIN="/etc/NetworkManager/conf.d/99-linux-optimizer-dnsnone.conf"
 NM_DNSNONE_CREATED=0
+
+# ---- Persistence (networkd-dispatcher) ----
+DNS_STATE_DIR="/var/lib/linux-optimizer"
+DNS_STATE_FILE="$DNS_STATE_DIR/dns.env"
+NETWORKD_DISPATCHER_HOOK="/etc/networkd-dispatcher/routable.d/70-linux-optimizer-dns"
+DNS_STATE_WRITTEN=0
+DNS_HOOK_CREATED=0
 
 # ---- DNS database ---------------------------------------------------
 # Format: "IPv4_servers|IPv6_servers|DoT_pairs"
@@ -514,6 +520,61 @@ override_link_dns_runtime() {
     return 0
 }
 
+networkd_active() {
+    systemctl is-active --quiet systemd-networkd 2>/dev/null
+}
+
+persist_dns_state() {
+    # Persist selected DNS so it is re-applied after reboot/renew on
+    # netplan/networkd-based servers (Ubuntu Server default).
+    [ -n "$DNS_V4" ] || return 0
+    mkdir -p "$DNS_STATE_DIR" 2>/dev/null || return 0
+
+    local all="$DNS_V4"
+    [ -n "$DNS_V6" ] && all="$DNS_V4 $DNS_V6"
+    printf 'OPT_DNS_ALL="%s"\n' "$all" > "$DNS_STATE_FILE"
+    chmod 644 "$DNS_STATE_FILE"
+    DNS_STATE_WRITTEN=1
+
+    if networkd_active; then
+        if ! command -v networkd-dispatcher >/dev/null 2>&1; then
+            yellow_msg "Installing networkd-dispatcher (keeps DNS after reboot/renew)..."
+            if command -v apt-get >/dev/null 2>&1; then
+                DEBIAN_FRONTEND=noninteractive apt-get install -yq networkd-dispatcher >/dev/null 2>&1 || true
+            elif command -v dnf >/dev/null 2>&1; then
+                dnf install -y networkd-dispatcher >/dev/null 2>&1 || true
+            fi
+        fi
+        if command -v networkd-dispatcher >/dev/null 2>&1; then
+            mkdir -p "$(dirname "$NETWORKD_DISPATCHER_HOOK")" 2>/dev/null
+            if [ ! -f "$NETWORKD_DISPATCHER_HOOK" ]; then
+                cat > "$NETWORKD_DISPATCHER_HOOK" <<'EOF'
+#!/bin/sh
+# Re-apply Linux-Optimizer DNS after link state changes (reboot/renew).
+[ -r /var/lib/linux-optimizer/dns.env ] || exit 0
+command -v resolvectl >/dev/null 2>&1 || exit 0
+[ -n "$DEVICE" ] || exit 0
+[ "$DEVICE" = "lo" ] && exit 0
+. /var/lib/linux-optimizer/dns.env
+[ -n "$OPT_DNS_ALL" ] || exit 0
+# shellcheck disable=SC2086
+resolvectl dns "$DEVICE" $OPT_DNS_ALL >/dev/null 2>&1 || true
+exit 0
+EOF
+                chmod 755 "$NETWORKD_DISPATCHER_HOOK"
+                DNS_HOOK_CREATED=1
+                green_msg "networkd-dispatcher hook installed - DNS persists after reboot."
+            else
+                green_msg "networkd-dispatcher hook already present."
+            fi
+            systemctl try-restart networkd-dispatcher >/dev/null 2>&1 || true
+        else
+            yellow_msg "networkd-dispatcher unavailable; DNS override may not survive reboot/renew."
+        fi
+    fi
+    return 0
+}
+
 apply_dns_systemd_resolved() {
     yellow_msg "Method: systemd-resolved (drop-in: $RESOLVED_DROPIN)"
 
@@ -587,7 +648,8 @@ apply_dns_systemd_resolved() {
         nm_apply_dns_to_profiles
     fi
 
-    override_link_dns_runtime "$dns_value"
+        override_link_dns_runtime "$dns_value"
+    persist_dns_state
     return 0
 }
 
@@ -835,6 +897,11 @@ rollback_dns() {
     fi
 }
 
+has_ipv6() {
+    command -v ip >/dev/null 2>&1 || return 0
+    ip -6 route show default 2>/dev/null | grep -q '^default'
+}
+
 # ---- MAIN DNS FLOW --------------------------------------------------------
 fix_dns() {
     echo
@@ -985,29 +1052,28 @@ sleep 0.5
 
 
 # Run Script based on Distros
-case $OS in
-ubuntu)
-    # Ubuntu
-    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/ubuntu-optimizer.sh" -q -O ubuntu-optimizer.sh && chmod +x ubuntu-optimizer.sh && bash ubuntu-optimizer.sh 
-    ;;
-debian)
-    # Debian
-    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/debian-optimizer.sh" -q -O debian-optimizer.sh && chmod +x debian-optimizer.sh && bash debian-optimizer.sh 
-    ;;
-centos)
-    # CentOS
-    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O centos-optimizer.sh && chmod +x centos-optimizer.sh && bash centos-optimizer.sh 
-    ;;
-almalinux)
-    # AlmaLinux
-    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O almalinux-optimizer.sh && chmod +x almalinux-optimizer.sh && bash almalinux-optimizer.sh 
-    ;;
-fedora)
-    # Fedora
-    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/fedora-optimizer.sh" -q -O fedora-optimizer.sh && chmod +x fedora-optimizer.sh && bash fedora-optimizer.sh 
-    ;;
-unknown)
-    # Unknown
-    exit 
-    ;;
-esac
+run_distro_optimizer() {
+    local url file
+    case "$OS" in
+        ubuntu)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/ubuntu-optimizer.sh"; file="ubuntu-optimizer.sh" ;;
+        debian)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/debian-optimizer.sh"; file="debian-optimizer.sh" ;;
+        centos)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh"; file="centos-optimizer.sh" ;;
+        almalinux) url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh"; file="almalinux-optimizer.sh" ;;
+        fedora)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/fedora-optimizer.sh"; file="fedora-optimizer.sh" ;;
+    esac
+
+    if ! wget "$url" -q -O "$file"; then
+        red_msg "Download failed: $url"
+        red_msg "Check network/DNS, then re-run the script."
+        exit 1
+    fi
+    chmod +x "$file"
+
+    if ! bash -n "$file" 2>/dev/null; then
+        red_msg "Downloaded script failed the syntax check. Aborting for safety."
+        exit 1
+    fi
+    bash "$file"
+}
+
+run_distro_optimizer
