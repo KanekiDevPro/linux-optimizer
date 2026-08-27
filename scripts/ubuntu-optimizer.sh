@@ -1,4 +1,5 @@
 #!/bin/bash
+
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -314,14 +315,11 @@ install_xanmod() {
     yellow_msg "HTTPS not reachable, HTTP fallback available but prefer HTTPS"
   fi
   local tmp; tmp=$(mktemp)
-  # Full fingerprint verification (#21) - official XanMod archive key full fingerprint
-  # Source: https://xanmod.org / https://dl.xanmod.org/archive.key
-  # Full 40-char fingerprint: D5A85488216F02844A764A8086ED3C142A2F4D95 is illustration; authoritative value below is used
-  # Correct full fingerprint as per XanMod documentation (2024): 86ED3C142A2F4D95 is keyID, full is 4EADBE29E7FA830B... Wait verify.
-  # We hard-code full 40-char and compare exact equality, fail closed.
-  local EXPECTED_FP_FULL="ABAF11E6A1109C5644DF00F18EB857B5AFD491"
-  # Note: This is the full fingerprint for XanMod's archive key (example authoritative). Verify at https://xanmod.org/archive.key
-  # For production, replace with exact 40-char uppercase no spaces as published by XanMod.
+  # Full fingerprint verification (#21) - official XanMod archive key
+  # Source: https://dl.xanmod.org/archive.key and https://gitlab.com/afrd.gpg
+  # Verified 2026-08-27 via gpg --show-keys on downloaded key: D38D7D1DA1349567ADED882D86F7D09EE734E623
+  # Key: XanMod Kernel <kernel@xanmod.org> rsa2048 2017-01-07, KeyID 86F7D09EE734E623
+  local EXPECTED_FP_FULL="D38D7D1DA1349567ADED882D86F7D09EE734E623"
   local key_url="https://dl.xanmod.org/archive.key"
   if is_dry; then yellow_msg "[DRY] would download $key_url and verify fingerprint $EXPECTED_FP_FULL"; rm -f "$tmp"; commit_transaction; return 0; fi
   if ! wget -qO "$tmp" "$key_url" || [[ ! -s "$tmp" ]]; then
@@ -464,23 +462,21 @@ sysctl_optimizations() {
   local has_bbr=0
   if sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then has_bbr=1; else yellow_msg "BBR not available -> cubic"; fi
 
-  # fq detection proper (#17)
+  # fq detection - fully read-only, never mutates runtime (#17, requirement 3)
   local orig_qdisc; orig_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "pfifo_fast")
   local chosen_qdisc="$orig_qdisc"
   local has_fq=0
-  if is_dry; then yellow_msg "[DRY] would test fq availability (skipped)"; chosen_qdisc="fq"
+  # Read-only checks: module availability, tc help, without sysctl -w
+  if modinfo sch_fq >/dev/null 2>&1 || [[ -f "/lib/modules/$(uname -r)/kernel/net/sched/sch_fq.ko" ]] || [[ -f "/lib/modules/$(uname -r)/kernel/net/sched/sch_fq.ko.xz" ]] || [[ -f "/lib/modules/$(uname -r)/kernel/net/sched/sch_fq.ko.zst" ]] || grep -qw "fq" /proc/modules 2>/dev/null || tc qdisc help 2>&1 | grep -qw "fq"; then
+    has_fq=1
+    chosen_qdisc="fq"
   else
-    # test if fq can be set, then restore
-    if sysctl -w net.core.default_qdisc=fq >/dev/null 2>&1; then has_fq=1; chosen_qdisc="fq"
-      # restore original immediately
-      sysctl -w net.core.default_qdisc="$orig_qdisc" >/dev/null 2>&1 || true
-    else
-      # fallback to current valid qdisc
-      has_fq=0; chosen_qdisc="$orig_qdisc"
-      # if original is empty or invalid, use fq_codel as safe fallback
-      if [[ -z "$chosen_qdisc" ]]; then chosen_qdisc="fq_codel"; fi
-    fi
-    log "qdisc detect: orig=$orig_qdisc has_fq=$has_fq chosen=$chosen_qdisc"
+    # Check if current qdisc already fq
+    if [[ "$orig_qdisc" == "fq" ]]; then has_fq=1; chosen_qdisc="fq"; else has_fq=0; chosen_qdisc="$orig_qdisc"; fi
+    if [[ -z "$chosen_qdisc" ]]; then chosen_qdisc="fq_codel"; fi
+  fi
+  if is_dry; then yellow_msg "[DRY] qdisc detect: orig=$orig_qdisc has_fq=$has_fq chosen=$chosen_qdisc (read-only, no mutation)"
+  else log "qdisc detect: orig=$orig_qdisc has_fq=$has_fq chosen=$chosen_qdisc (read-only)"
   fi
 
   # RAM-aware bytes for rmem/wmem (bytes)
