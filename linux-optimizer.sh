@@ -35,7 +35,7 @@ green_msg '================================================================='
 green_msg 'This script will automatically Optimize your Linux Server.'
 green_msg 'Tested on: Ubuntu 20+, Debian 11+, CentOS stream 8+, AlmaLinux 8+, Fedora 37+'
 green_msg 'Root access is required.' 
-green_msg 'Source is @ https://github.com/hawshemi/linux-optimizer' 
+green_msg 'Source is @ https://github.com/KanekiDevPro/linux-optimizer' 
 green_msg '================================================================='
 echo 
 
@@ -226,7 +226,7 @@ elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "Fedora Linux" ]]; 
 else
     echo 
     sleep 0.5
-    red_msg "Unknown OS, Create an issue here: https://github.com/hawshemi/Linux-Optimizer"
+    red_msg "Unknown OS, Create an issue here: https://github.com/KanekiDevPro/Linux-Optimizer"
     OS="unknown"
     echo 
     sleep 2
@@ -260,23 +260,23 @@ sleep 0.5
 case $OS in
 ubuntu)
     # Ubuntu
-    wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/scripts/ubuntu-optimizer.sh" -q -O ubuntu-optimizer.sh && chmod +x ubuntu-optimizer.sh && bash ubuntu-optimizer.sh 
+    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/ubuntu-optimizer.sh" -q -O ubuntu-optimizer.sh && chmod +x ubuntu-optimizer.sh && bash ubuntu-optimizer.sh 
     ;;
 debian)
     # Debian
-    wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/scripts/debian-optimizer.sh" -q -O debian-optimizer.sh && chmod +x debian-optimizer.sh && bash debian-optimizer.sh 
+    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/debian-optimizer.sh" -q -O debian-optimizer.sh && chmod +x debian-optimizer.sh && bash debian-optimizer.sh 
     ;;
 centos)
     # CentOS
-    wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O centos-optimizer.sh && chmod +x centos-optimizer.sh && bash centos-optimizer.sh 
+    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O centos-optimizer.sh && chmod +x centos-optimizer.sh && bash centos-optimizer.sh 
     ;;
 almalinux)
     # AlmaLinux
-    wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O almalinux-optimizer.sh && chmod +x almalinux-optimizer.sh && bash almalinux-optimizer.sh 
+    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/centos-optimizer.sh" -q -O almalinux-optimizer.sh && chmod +x almalinux-optimizer.sh && bash almalinux-optimizer.sh 
     ;;
 fedora)
     # Fedora
-    wget "https://raw.githubusercontent.com/hawshemi/Linux-Optimizer/main/scripts/fedora-optimizer.sh" -q -O fedora-optimizer.sh && chmod +x fedora-optimizer.sh && bash fedora-optimizer.sh 
+    wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/fedora-optimizer.sh" -q -O fedora-optimizer.sh && chmod +x fedora-optimizer.sh && bash fedora-optimizer.sh 
     ;;
 unknown)
     # Unknown
