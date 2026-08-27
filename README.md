@@ -1,132 +1,148 @@
-# Linux Optimizer
+# Linux-Optimizer
 
-## This Bash script automates the optimization of your Linux server.
-#### Notes:
- 1. This script is designed for execution on Linux server environments, including VPS, VDS, Dedicated, and Bare Metal systems. It is not recommended for use on Linux desktop environments.
- 2. Modifying the kernel (options 1 and 2) may result in removing or resetting some GPU drivers.
- 3. Some VMs do not support kernel changes (options 1 and 2). Installing XanMod could cause the VM to break. Please be cautious and test beforehand.
+A robust, idempotent system optimizer script for Debian/Ubuntu servers with a focus on VPN performance, stability, and security.
 
-### It performs the following tasks:
-       
-0. Fix `hosts` file and DNS _(temporarily)_:
-    - Check and add 127.0.1.1 and server hostname to `/etc/hosts`.
-    
-    *Original `hosts` file is backed up at `/etc/hosts.bak`.*
-    - Add `Cloudflare-Security` DNS servers _`(1.1.1.2, 1.0.0.2)`_ nameservers to `/etc/resolv.conf`.
-    
-    *Original `dns` file is backed up at `/etc/resolv.conf.bak`.*
+This script safely applies a set of best-practice system tweaks:
+- System updates and cleanup
+- Useful package installation
+- Swap file creation
+- Network (sysctl) tuning with selectable profiles
+- SSH hardening
+- System limits optimization
+- UFW firewall setup (TCP-only)
 
+> **Note:** This tool does **not** create tunnels. It prepares the server for high-performance VPN workloads (WireGuard, OpenVPN, etc.) by optimizing kernel parameters and system settings.
 
-1. Update, Upgrade, and Clean the server:
-    - _Update_
-    - _Upgrade_
-    - _Full-Upgrade_
-    - _AutoRemove_
-    - _AutoClean_
-    - _Clean_
+---
 
+## Features
 
-2. Disable Terminal Ads _(Only on Ubuntu)_.
+- ✅ **Idempotent** – Safe to run multiple times without duplicating entries or breaking configuration.
+- 🧠 **Profile-based sysctl tuning** – Choose from 5 profiles tailored to different use cases.
+- ⚡ **Automatic detection** – Auto profile selects the best settings based on RAM, CPU cores, and link speed.
+- 🔒 **SSH hardening** – Reasonable keepalive values and secure defaults (no risky forwarding).
+- 🛡️ **UFW firewall** – Opens only necessary TCP ports (SSH, 80, 443); UDP rules removed.
+- 💾 **Swap creation** – Creates and mounts a 2G swap file with filesystem-aware checks.
+- 📦 **Package installation** – Installs useful packages individually, so a missing package won’t abort the whole process.
+- 🔁 **Single APT update** – Centralised guard ensures only one `apt update` per run (even in Option 1).
+- 🧹 **Legacy cleanup** – Removes old optimizer entries from `/etc/sysctl.conf` and `/etc/profile` without touching user customizations.
 
+---
 
-3. Install XanMod Kernel _(Only on Ubuntu & Debian)_:
-    - Enable BBRv3.
-    - CloudFlare TCP Optimizations.
-    - More Details: https://xanmod.org
+## Requirements
 
-4. Install Useful Packages:
+- **Operating System:** Debian or Ubuntu (including derivatives).
+- **Privileges:** Must be run as `root` (or with `sudo`).
+- **Shell:** Bash.
+- **Network:** Internet access for package installation and updates.
 
-    _`apt-transport-https`_ _`apt-utils`_ _`autoconf`_ _`automake`_ _`bash-completion`_ _`bc`_ _`binutils`_ _`binutils-common`_ _`binutils-x86-64-linux-gnu`_ _`build-essential`_ _`busybox`_ _`ca-certificates`_ _`cron`_ _`curl`_ _`dialog`_ _`epel-release`_ _`gnupg2`_ _`git`_ _`haveged`_ _`htop`_ _`jq`_ _`keyring`_ _`libssl-dev`_ _`libsqlite3-dev`_ _`libtool`_ _`locales`_ _`lsb-release`_ _`make`_ _`nano`_ _`net-tools`_ _`packagekit`_ _`preload`_ _`python3`_ _`python3-pip`_ _`qrencode`_ _`socat`_ _`screen`_ _`software-properties-common`_ _`ufw`_ _`unzip`_ _`vim`_ _`wget`_ _`zip`_
+> ⚠️ The script should be run on a fresh or minimal server. Always test in a non‑production environment first.
 
+---
 
-5. Enable Packages at Server Boot.
+## Installation
 
-    
-6. Set the server TimeZone to the VPS IP address location.
+1. Download the script:
+   ```bash
+   wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh
 
- 
-7. Create & Enable `SWAP` File:
-    - Swap Path: `"/swapfile"`
-    - Swap Size: `2Gb`
+   What the Script Does
+1. System Update & Cleanup
+Runs apt update, apt upgrade, apt full-upgrade, apt autoremove, apt autoclean, and apt clean.
 
+Only one apt update is performed per script run (central flag).
 
-8. Optimize the [SYSCTL](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sysctl.conf) Configs:
-    - Optimize File System Settings.
-    - Optimize Network Core Settings.
-    - Optimize `SWAP`.
-    - Optimize `TCP` and `UDP` Settings.
-    - Optimize `UNIX` Domain Sockets Settings.
-    - Optimize `Virtual memory (VM)` Settings.
-    - Optimize Network Configuration Settings.
-    - Optimize the Kernel.
-    - Activate `BBR` _(`BBRv3` with XanMod)_.
+2. Package Installation
+Installs a set of useful packages (networking, system utilities, development tools, etc.).
 
-    *Original file is backed up at `/etc/sysctl.conf.bak`.*
+Packages are installed individually, so failure of one does not affect the rest.
 
-    
-9. Optimize [SSH](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/sshd_config):
-    - Disable DNS lookups for connecting clients.
-    - Remove less efficient encryption ciphers.
-    - Enable and Configure TCP keep-alive messages.
-    - Allow TCP forwarding.
-    - Enable gateway ports, Tunneling and compression.
-    - Enable X11 Forwarding.
+Enables essential services (cron, haveged, preload) if they exist.
 
-    *Original file is backed up at `/etc/ssh/sshd_config.bak`.*
-   
+3. Swap Creation
+Creates a 2GB swap file at /swapfile.
 
-10. Optimize the [System Limits](https://github.com/hawshemi/Linux-Optimizer/blob/main/files/profile):
-    - Soft and Hard *ulimit* `-c -d -f -i -l -n -q -s -u -v -x` optimizations.
-    
-    
-11. Optimize `UFW` and open Common Ports:
-    - Open Ports `SSH`, `80`, `443`.
-    - With `IPv6`, `TCP` & `UDP`.
+Checks existing swap, filesystem support, and available disk space.
 
-    
-**Reboot at the end is recommended.**
+Adds entry to /etc/fstab only if not already present.
 
+4. Network Optimization (sysctl)
+Detects BBR support and uses it if available; otherwise falls back to cubic.
 
-## Prerequisites
+Detects fq qdisc support and uses it; otherwise falls back to fq_codel.
 
-### Ensure that the `sudo` and `wget` packages are installed on your system:
+Applies RAM‑aware TCP/UDP memory settings to avoid excessive memory usage on small VPS.
 
-- Ubuntu & Debian:
-```
-sudo apt update -q && sudo apt install -y sudo wget
-```
-- CentOS & Fedora:
-```
-sudo dnf up -y && sudo dnf install -y sudo wget
-```
+Writes all settings to /etc/sysctl.d/99-optimizer.conf (overwrites cleanly).
 
+Cleans up any old optimizer entries from /etc/sysctl.conf without touching user comments.
 
-## Run
-#### **Tested on:** Ubuntu 20+, Debian 11+, CentOS Stream 8+, AlmaLinux 8+, Fedora 37+
+Reports any unsupported sysctl keys.
 
-#### Root Access is Required. If the user is not root, first run:
-```
-sudo -i
-```
-#### Then:
-```
-wget "https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/linux-optimizer.sh" -O linux-optimizer.sh && chmod +x linux-optimizer.sh && bash linux-optimizer.sh 
-```
+5. SSH Hardening
+Sets reasonable keepalive values (ClientAliveInterval 300, ClientAliveCountMax 3).
 
+Disables risky forwarding/tunneling options by default (AllowTcpForwarding no, GatewayPorts no, PermitTunnel no, X11Forwarding no).
 
-## Menu Image
-### Debian & Ubuntu:
-![debian-based-menu](https://github.com/hawshemi/Linux-Optimizer/assets/16742123/3604470e-48ed-403d-a753-143dc934f6fd)
+Validates the SSH configuration with sshd -t before restarting the service.
 
-### CentOS, AlmaLinux & Fedora:
-![rhel-based-menu](https://github.com/hawshemi/Linux-Optimizer/assets/16742123/07099e64-3864-425f-83e2-cda1e57d5b62)
+6. System Limits
+Creates /etc/security/limits.d/99-optimizer.conf with high file descriptor and process limits.
 
+Also sets DefaultLimitNOFILE, DefaultLimitNPROC, and DefaultLimitMEMLOCK in systemd configuration.
 
+Removes only old optimizer‑added ulimit lines from /etc/profile, preserving user custom entries.
 
-## Disclaimer
-This script is provided as-is, without any warranty or guarantee. Use it at your own risk.
+7. UFW Firewall
+Installs UFW if not present.
 
+Removes any conflicting firewalld.
 
-## License
-This script is licensed under the MIT License.
+Opens only TCP ports: SSH (detected port), 80, and 443.
 
+Deletes any UDP rules that may have been added by older versions.
+
+Sets default policies: deny incoming, allow outgoing.
+
+Enables UFW non‑interactively.
+
+Safety & Backups
+Before modifying critical files, the script creates timestamped backups:
+
+/etc/sysctl.conf.bak.*
+
+/etc/ssh/sshd_config.bak.*
+
+/etc/fstab.bak.*
+
+/etc/profile.bak.*
+
+The script is designed to be idempotent: running it multiple times will not duplicate entries or corrupt settings.
+
+If the script encounters a missing package or unsupported kernel parameter, it logs a warning and continues.
+
+Verification
+After running the script, you can verify the applied settings with:
+
+bash
+# Check congestion control (should be bbr or cubic)
+sysctl net.ipv4.tcp_congestion_control
+
+# Check qdisc
+sysctl net.core.default_qdisc
+
+# Check TCP/UDP memory
+sysctl net.ipv4.tcp_rmem net.ipv4.tcp_wmem
+sysctl net.ipv4.udp_mem
+
+# Check swap
+swapon --show
+free -h
+
+# Check SSH settings
+sudo sshd -T | grep -E 'clientaliveinterval|clientalivecountmax|allowtcpforwarding|gatewayports|permittunnel|x11forwarding'
+
+# Check UFW status
+sudo ufw status verbose
+Disclaimer
+This script modifies system configuration files and kernel parameters. While it aims to be safe and idempotent, use it at your own risk. Always test on a non‑production environment and keep backups. The author is not responsible for any data loss or system instability.
