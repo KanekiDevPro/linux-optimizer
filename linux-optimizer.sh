@@ -115,24 +115,214 @@ fix_etc_hosts(){
 }
 
 
-# Fix DNS Temporarily
-fix_dns(){
-    echo 
-    yellow_msg "Fixing DNS Temporarily."
+# ------------------- DNS SECTION -------------------
+
+TS=$(date +%Y%m%d-%H%M%S)
+
+# DNS database: "IPv4_1 IPv4_2|IPv6_1 IPv6_2"
+get_dns_list() {
+    case "$1" in
+        1)  echo "1.1.1.1 1.0.0.1|2606:4700:4700::1111 2606:4700:4700::1001" ;;     # Cloudflare
+        2)  echo "1.1.1.2 1.0.0.2|2606:4700:4700::1112 2606:4700:4700::1002" ;;     # Cloudflare Anti-Malware
+        3)  echo "1.1.1.3 1.0.0.3|2606:4700:4700::1113 2606:4700:4700::1003" ;;     # Cloudflare Family
+        4)  echo "8.8.8.8 8.8.4.4|2001:4860:4860::8888 2001:4860:4860::8844" ;;     # Google
+        5)  echo "9.9.9.9 149.112.112.112|2620:fe::fe 2620:fe::9" ;;                # Quad9
+        6)  echo "94.140.14.14 94.140.15.15|2a10:50c0::ad1:ff 2a10:50c0::ad2:ff" ;; # AdGuard
+        7)  echo "208.67.222.222 208.67.220.220|2620:119:35::35 2620:119:53::53" ;; # OpenDNS
+        8)  echo "178.22.122.100 185.51.200.2|" ;;                                  # Shecan (IR)
+        9)  echo "78.157.42.100 78.157.42.101|" ;;                                  # Electro (IR)
+        10) echo "10.202.10.202 10.202.10.102|" ;;                                  # 403.online (IR)
+        11) echo "185.55.226.26 185.55.225.25|" ;;                                  # Begzar (IR)
+        12) echo "10.202.10.10 10.202.10.11|" ;;                                    # Radar Game (IR)
+        13) echo "178.22.122.100 185.51.200.2 78.157.42.100 78.157.42.101|" ;;      # Mix: Shecan + Electro
+        14) echo "1.1.1.2 8.8.8.8|2606:4700:4700::1112 2001:4860:4860::8888" ;;     # Mix: Cloudflare + Google
+        15) echo "custom" ;;
+    esac
+}
+
+get_dns_name() {
+    case "$1" in
+        1) echo "Cloudflare" ;;              2) echo "Cloudflare Anti-Malware" ;;
+        3) echo "Cloudflare Family" ;;       4) echo "Google" ;;
+        5) echo "Quad9" ;;                   6) echo "AdGuard" ;;
+        7) echo "OpenDNS" ;;                 8) echo "Shecan (IR)" ;;
+        9) echo "Electro (IR)" ;;            10) echo "403.online (IR)" ;;
+        11) echo "Begzar (IR)" ;;            12) echo "Radar Game (IR)" ;;
+        13) echo "Mix: Shecan + Electro" ;;  14) echo "Mix: Cloudflare + Google" ;;
+        15) echo "Custom" ;;
+    esac
+}
+
+choose_dns() {
+    echo
+    yellow_msg "Select a DNS configuration:"
+    cat <<'EOF'
+ 1)  Cloudflare                 (1.1.1.1)
+ 2)  Cloudflare Anti-Malware    (1.1.1.2)  <- recommended
+ 3)  Cloudflare Family          (1.1.1.3)
+ 4)  Google                     (8.8.8.8)
+ 5)  Quad9                      (9.9.9.9)
+ 6)  AdGuard AdBlock            (94.140.14.14)
+ 7)  OpenDNS                    (208.67.222.222)
+ 8)  Shecan [IR]                (178.22.122.100)
+ 9)  Electro [IR]               (78.157.42.100)
+ 10) 403.online [IR]            (10.202.10.202)
+ 11) Begzar [IR]                (185.55.226.26)
+ 12) Radar Game [IR]            (10.202.10.10)
+ 13) Mix: Shecan + Electro [IR]
+ 14) Mix: Cloudflare + Google
+ 15) Custom (manual input)
+EOF
+    echo
+    while true; do
+        read -rp "[*] Select DNS [1-15]: " DNS_CHOICE
+        DNS_LIST=$(get_dns_list "$DNS_CHOICE")
+        [ -n "$DNS_LIST" ] && break
+        red_msg "Invalid choice, try again."
+    done
+}
+
+parse_dns_choice() {
+    DNS_NAME=$(get_dns_name "$DNS_CHOICE")
+    if [ "$DNS_LIST" = "custom" ]; then
+        read -rp "[*] Enter IPv4 DNS servers (space separated): " DNS_V4
+        read -rp "[*] Enter IPv6 DNS servers (optional): " DNS_V6
+        [ -z "$DNS_V4" ] && { red_msg "No IPv4 DNS entered. Skipping DNS change."; return 1; }
+    else
+        DNS_V4="${DNS_LIST%%|*}"
+        DNS_V6="${DNS_LIST#*|}"
+        [ "$DNS_V6" = "$DNS_LIST" ] && DNS_V6=""
+    fi
+    DNS_ALL="$DNS_V4"
+    [ -n "$DNS_V6" ] && DNS_ALL="$DNS_V4 $DNS_V6"
+    green_msg "Selected: $DNS_NAME  ($DNS_ALL)"
+    return 0
+}
+
+# Detect the ACTIVE DNS manager (more reliable than distro name)
+detect_dns_method() {
+    if systemctl is-active --quiet systemd-resolved 2>/dev/null && command -v resolvectl >/dev/null 2>&1; then
+        echo "systemd-resolved"
+    elif systemctl is-active --quiet NetworkManager 2>/dev/null && command -v nmcli >/dev/null 2>&1; then
+        echo "networkmanager"
+    else
+        echo "resolvconf"
+    fi
+}
+
+apply_dns_systemd_resolved() {
+    yellow_msg "Method: systemd-resolved (/etc/systemd/resolved.conf)"
+    cp /etc/systemd/resolved.conf "/etc/systemd/resolved.conf.bak.$TS" 2>/dev/null || touch /etc/systemd/resolved.conf
+
+    # Clean old entries (commented or active) and inject ours
+    sed -i -E '/^\s*#?\s*(DNS|FallbackDNS)\s*=/d' /etc/systemd/resolved.conf
+    grep -q '^\s*\[Resolve\]' /etc/systemd/resolved.conf || echo '[Resolve]' >> /etc/systemd/resolved.conf
+    sed -i "/^\[Resolve\]/a DNS=$DNS_ALL" /etc/systemd/resolved.conf
+
+    # Optional encrypted DNS (safe "opportunistic" mode)
+    read -rp "[*] Enable DNS-over-TLS? [y/N]: " DOT_ANS
+    if [[ "$DOT_ANS" =~ ^[Yy]$ ]]; then
+        sed -i -E '/^\s*#?\s*DNSOverTLS\s*=/d' /etc/systemd/resolved.conf
+        sed -i '/^\[Resolve\]/a DNSOverTLS=opportunistic' /etc/systemd/resolved.conf
+    fi
+
+    systemctl restart systemd-resolved
+}
+
+apply_dns_networkmanager() {
+    yellow_msg "Method: NetworkManager (nmcli)"
+    local dev con applied=0
+
+    while read -r dev; do
+        [ -z "$dev" ] || [ "$dev" = "lo" ] && continue
+        con=$(nmcli -t -f GENERAL.CONNECTION device show "$dev" 2>/dev/null | cut -d: -f2-)
+        [ -z "$con" ] && continue
+
+        nmcli connection modify "$con" ipv4.dns "$DNS_V4" ipv4.ignore-auto-dns yes || continue
+        [ -n "$DNS_V6" ] && nmcli connection modify "$con" ipv6.dns "$DNS_V6" ipv6.ignore-auto-dns yes
+
+        if nmcli device reapply "$dev" >/dev/null 2>&1; then
+            applied=1
+            green_msg "DNS applied to: $con ($dev)"
+        fi
+    done < <(nmcli -t -f DEVICE device status 2>/dev/null)
+
+    # Fallback: write resolv.conf directly + stop NM from overwriting it
+    local first_ns="${DNS_V4%% *}"
+    if [ "$applied" -eq 0 ] || ! grep -q "nameserver $first_ns" /etc/resolv.conf 2>/dev/null; then
+        yellow_msg "nmcli failed; writing /etc/resolv.conf directly."
+        cp /etc/resolv.conf "/etc/resolv.conf.bak.$TS" 2>/dev/null
+        write_resolvconf
+        if [ -f /etc/NetworkManager/NetworkManager.conf ] && ! grep -q '^\s*dns=none' /etc/NetworkManager/NetworkManager.conf; then
+            printf '\n[main]\ndns=none\n' >> /etc/NetworkManager/NetworkManager.conf
+            systemctl restart NetworkManager 2>/dev/null || true
+        fi
+    fi
+}
+
+write_resolvconf() {
+    # If it is a symlink into /run (managed), replace with a real file
+    [ -L /etc/resolv.conf ] && rm -f /etc/resolv.conf
+    {
+        echo "# Generated by Linux-Optimizer ($TS)"
+        for ns in $DNS_V4 $DNS_V6; do echo "nameserver $ns"; done
+    } > /etc/resolv.conf
+    chmod 644 /etc/resolv.conf
+}
+
+apply_dns_resolvconf() {
+    yellow_msg "Method: direct /etc/resolv.conf"
+    cp /etc/resolv.conf "/etc/resolv.conf.bak.$TS" 2>/dev/null
+    write_resolvconf
+}
+
+verify_dns() {
+    sleep 1
+    if getent hosts github.com >/dev/null 2>&1; then
+        green_msg "DNS test OK: github.com -> $(getent hosts github.com | head -n1 | awk '{print $1}')"
+        show_dns_status
+        return 0
+    fi
+    red_msg "DNS test FAILED! Restoring backup..."
+    [ -f "/etc/resolv.conf.bak.$TS" ] && cp "/etc/resolv.conf.bak.$TS" /etc/resolv.conf
+    if [ -f "/etc/systemd/resolved.conf.bak.$TS" ]; then
+        cp "/etc/systemd/resolved.conf.bak.$TS" /etc/systemd/resolved.conf
+        systemctl restart systemd-resolved
+    fi
+    sleep 1
+    getent hosts github.com >/dev/null 2>&1 && green_msg "Old DNS restored." || red_msg "Old DNS also failed. Check the network!"
+    return 1
+}
+
+show_dns_status() {
+    echo
+    yellow_msg "Active nameservers:"
+    grep nameserver /etc/resolv.conf 2>/dev/null
+    systemctl is-active --quiet systemd-resolved 2>/dev/null && \
+        resolvectl status 2>/dev/null | grep -E "Current DNS Server|DNS Servers" | head -n 4
+    echo
+}
+
+# ------------------- MAIN DNS FLOW -------------------
+fix_dns() {
+    echo
+    yellow_msg "DNS Configuration."
     sleep 0.5
 
-    cp $DNS_PATH /etc/resolv.conf.bak
-    yellow_msg "Default resolv.conf file saved. Directory: /etc/resolv.conf.bak"
-    sleep 0.5
+    choose_dns
+    parse_dns_choice || { echo; return 1; }
 
-    sed -i '/nameserver/d' $DNS_PATH
+    local method
+    method=$(detect_dns_method)
+    green_msg "Detected DNS manager: $method"
 
-    echo "nameserver 1.1.1.2" >> $DNS_PATH
-    echo "nameserver 1.0.0.2" >> $DNS_PATH
-    echo "nameserver 127.0.0.53" >> $DNS_PATH
+    case "$method" in
+        systemd-resolved) apply_dns_systemd_resolved ;;
+        networkmanager)   apply_dns_networkmanager ;;
+        *)                apply_dns_resolvconf ;;
+    esac
 
-    green_msg "DNS Fixed Temporarily."
-    echo 
+    verify_dns
     sleep 0.5
 }
 
