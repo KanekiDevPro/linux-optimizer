@@ -793,10 +793,13 @@ rollback_dns() {
         done
     fi
 
-    if [ "$NM_DNSNONE_CREATED" = "1" ]; then
-        rm -f "$NM_DNSNONE_DROPIN"
-        nmcli general reload >/dev/null 2>&1 || true
-        green_msg "NetworkManager dns=none drop-in removed."
+        if [ "$DNS_HOOK_CREATED" = "1" ]; then
+        rm -f "$NETWORKD_DISPATCHER_HOOK"
+        green_msg "networkd-dispatcher hook removed."
+    fi
+    if [ "$DNS_STATE_WRITTEN" = "1" ]; then
+        rm -f "$DNS_STATE_FILE"
+        green_msg "Persisted DNS state removed."
     fi
 
     if [ "$RESOLVED_DROPIN_WRITTEN" = "1" ]; then
@@ -840,6 +843,13 @@ fix_dns() {
 
     choose_dns || { echo; return 1; }
     parse_dns_choice || { echo; return 1; }
+
+    # Skip IPv6 DNS servers when the server has no IPv6 connectivity
+    if [ -n "$DNS_V6" ] && ! has_ipv6; then
+        yellow_msg "No IPv6 connectivity detected - IPv6 DNS servers skipped (IPv4-only mode)."
+        DNS_V6=""
+    fi
+
     print_selection_summary
 
     METHOD=$(detect_dns_method)
