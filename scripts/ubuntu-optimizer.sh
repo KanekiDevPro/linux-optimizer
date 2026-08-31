@@ -184,7 +184,7 @@ enable_packages() {
     sleep 0.5
 }
 
-## Swap Maker - FIXED
+## Swap Maker - FIXED (nofail added to prevent boot hang/emergency mode)
 swap_maker() {
     echo
     yellow_msg 'Making SWAP Space...'
@@ -221,8 +221,6 @@ swap_maker() {
     fi
 
     # Check available disk space (need at least SWAP_SIZE + 100MB)
-    # FIX: check filesystem of SWAP_PATH directory, not hardcoded /
-    # FIX: remove numfmt dependency (not always available) - use pure bash
     swap_dir=$(dirname "$SWAP_PATH")
     # Fallback to / if dirname doesn't exist yet
     [ -d "$swap_dir" ] || swap_dir="/"
@@ -247,8 +245,6 @@ swap_maker() {
     yellow_msg "Allocating $SWAP_SIZE at $SWAP_PATH..."
     if ! fallocate -l "$SWAP_SIZE" "$SWAP_PATH" 2>/dev/null; then
         yellow_msg "fallocate failed, using dd (slower but compatible)..."
-        # dd fallback: calculate count (case-insensitive, consistent with swap_mb)
-        # Use 1M blocks
         case "$SWAP_SIZE" in
             *G|*g) count=$((${SWAP_SIZE%[Gg]} * 1024)) ;;
             *M|*m) count=${SWAP_SIZE%[Mm]} ;;
@@ -273,9 +269,9 @@ swap_maker() {
         return 1
     fi
 
-    # Add to fstab only if not already present (idempotent)
+    # Add to fstab with nofail to prevent emergency mode on boot failure
     if ! grep -qF "$SWAP_PATH" /etc/fstab; then
-        echo "$SWAP_PATH   none    swap    sw    0   0" >> /etc/fstab
+        echo "$SWAP_PATH   none    swap    sw,nofail    0   0" >> /etc/fstab
     fi
 
     # Verify
@@ -613,7 +609,6 @@ sysctl_optimizations() {
     fi
     
     # Generate profile-specific config (OVERWRITE, never append)
-    # Include clear header with selected profile and detection information
     local header_info
     header_info="# Generated: $timestamp
 # Selected profile: $selected_profile
@@ -621,14 +616,13 @@ sysctl_optimizations() {
 # Detected RAM: ${ram_gb} GB
 # Detected CPU cores: ${cpu_cores}
 # Detected interface: ${iface}
-# Detected link speed: ${speed} $([ "$speed" != "unknown" ] && [ "$speed" != "unknown" ] && echo "Mb/s" || echo "")
+# Detected link speed: ${speed} $([ "$speed" != "unknown" ] && echo "Mb/s" || echo "")
 # Auto reason: ${auto_reason:-N/A (direct selection)}
 # BBR: $TCP_CC
 # QDISC: $QDISC
 # RAM-aware tcp_mem: ${tcp_mem:-not set (conservative)}
 # Host: $(hostname 2>/dev/null || echo unknown) Kernel: $(uname -r 2>/dev/null || echo unknown)"
     
-    # Ensure we overwrite, not append
     case "$selected_profile" in
         balanced)
             cat > "$SYS_OPTIMIZER_PATH" <<EOF
@@ -693,18 +687,15 @@ vm.dirty_ratio = 10
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
+# Network security (rp_filter=2 loose mode prevents dropped packets on multi-interface/VPNs)
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv4.neigh.default.gc_thresh1 = 512
 net.ipv4.neigh.default.gc_thresh2 = 2048
 net.ipv4.neigh.default.gc_thresh3 = 4096
 net.ipv4.neigh.default.gc_stale_time = 60
-net.ipv4.conf.default.arp_announce = 2
-net.ipv4.conf.lo.arp_announce = 2
-net.ipv4.conf.all.arp_announce = 2
 kernel.panic = 1
 
 EOF
@@ -772,18 +763,15 @@ vm.dirty_ratio = 15
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
+# Network security (rp_filter=2 loose mode prevents dropped packets on multi-interface/VPNs)
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv4.neigh.default.gc_thresh1 = 1024
 net.ipv4.neigh.default.gc_thresh2 = 2048
 net.ipv4.neigh.default.gc_thresh3 = 8192
 net.ipv4.neigh.default.gc_stale_time = 60
-net.ipv4.conf.default.arp_announce = 2
-net.ipv4.conf.lo.arp_announce = 2
-net.ipv4.conf.all.arp_announce = 2
 kernel.panic = 1
 
 EOF
@@ -851,22 +839,19 @@ vm.dirty_ratio = 10
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
+# Network security (rp_filter=2 loose mode prevents dropped packets on multi-interface/VPNs)
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 net.ipv4.neigh.default.gc_thresh1 = 512
 net.ipv4.neigh.default.gc_thresh2 = 2048
 net.ipv4.neigh.default.gc_thresh3 = 4096
 net.ipv4.neigh.default.gc_stale_time = 60
-net.ipv4.conf.default.arp_announce = 2
-net.ipv4.conf.lo.arp_announce = 2
-net.ipv4.conf.all.arp_announce = 2
 kernel.panic = 1
 
 EOF
-            # Add conservative busy_poll only if supported (not aggressive)
+            # Add conservative busy_poll only if supported
             if [ "$busy_poll_supported" = "1" ]; then
                 {
                     echo "# Busy poll - conservative (only if supported, low CPU impact)"
@@ -897,8 +882,6 @@ net.core.default_qdisc = $QDISC
 net.core.netdev_max_backlog = 5000
 net.core.optmem_max = 204800
 net.core.somaxconn = 4096
-# Preserve default rmem/wmem (not overriding) - only set safe defaults if needed
-# rmem/wmem left at kernel default for conservative
 
 # TCP - conservative (only safe improvements)
 net.ipv4.tcp_congestion_control = $TCP_CC
@@ -913,7 +896,6 @@ net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_syncookies = 1
 net.ipv4.tcp_fastopen = 0
 
-# UDP - not overriding (kernel default)
 # VM - minimal
 vm.min_free_kbytes = $min_free_kbytes
 vm.swappiness = 30
@@ -922,9 +904,9 @@ vm.dirty_ratio = 20
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security - safe
-net.ipv4.conf.default.rp_filter = 1
-net.ipv4.conf.all.rp_filter = 1
+# Network security (rp_filter=2 loose mode)
+net.ipv4.conf.default.rp_filter = 2
+net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
 kernel.panic = 1
@@ -954,16 +936,12 @@ EOF
     # Check for old optimizer block marker (legacy)
     if grep -q "File system settings" "$SYS_PATH" 2>/dev/null || grep -q "Generated by Linux-Optimizer" "$SYS_PATH" 2>/dev/null; then
         yellow_msg "Cleaning old optimizer block from $SYS_PATH (now using $SYS_OPTIMIZER_PATH)"
-        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.core.busy_poll net.core.busy_read net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.core.busy_poll net.core.busy_read net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
             sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
         done
     else
-        # Even if no marker, clean known managed keys if they were previously added without marker (idempotent)
-        # Only if they exist and were likely added by previous run (check if file contains our values)
-        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time net.ipv4.conf.default.arp_announce net.ipv4.conf.lo.arp_announce net.ipv4.conf.all.arp_announce kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
             if grep -q "^${key}[[:space:]]*=" "$SYS_PATH" 2>/dev/null; then
-                # Preserve user comments, only remove exact managed keys - but we need to be conservative: only remove if duplicate also in new file?
-                # For idempotency, remove from sysctl.conf if same key exists in new drop-in (to avoid duplication)
                 if grep -q "^${key}[[:space:]]*=" "$SYS_OPTIMIZER_PATH" 2>/dev/null; then
                     sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
                 fi
@@ -978,9 +956,7 @@ EOF
     yellow_msg "Applying sysctl settings (profile: $selected_profile)..."
     local apply_log
     apply_log=$(mktemp)
-    # Use sysctl --system, capture output
     if sysctl --system 2>&1 | tee "$apply_log"; then
-        # Even if exit 0, check for individual key failures in log
         if grep -q -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log"; then
             yellow_msg "Some sysctl keys reported warnings (likely unsupported on this kernel):"
             grep -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log" | head -n 20
@@ -989,13 +965,11 @@ EOF
             green_msg "sysctl --system applied successfully"
         fi
     else
-        # Non-zero exit, but still check log for details
         yellow_msg "sysctl --system had warnings, checking details..."
         if grep -q -i "error\|invalid\|cannot stat\|unknown key" "$apply_log"; then
             yellow_msg "Failed keys:"
             grep -i "error\|invalid\|cannot stat\|unknown key\|permission denied" "$apply_log" | head -n 20
         fi
-        # Fallback try direct apply of our file, but don't hide errors
         yellow_msg "Trying sysctl -p $SYS_OPTIMIZER_PATH for detailed errors..."
         local p_log
         p_log=$(mktemp)
@@ -1029,9 +1003,7 @@ find_ssh_port() {
 
     SSH_PORT=""
     if [ -e "$SSH_PATH" ]; then
-        # FIX: handle commented and multiple Port lines, take last active one
         SSH_PORT=$(grep -E "^\s*Port\s+[0-9]+" "$SSH_PATH" 2>/dev/null | awk '{print $2}' | tail -n1)
-        # Also try to get from sshd -T if available (more reliable)
         if command -v sshd >/dev/null 2>&1; then
             detected=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | tail -n1)
             [ -n "$detected" ] && SSH_PORT="$detected"
@@ -1067,7 +1039,7 @@ remove_old_ssh_conf() {
     echo
     sleep 1
 
-    # FIX: More robust cleaning - only remove exact directives we will re-add
+    # Clean directives we will re-add
     sed -i -e 's/^\s*#\?UseDNS.*/UseDNS no/' \
         -e 's/^\s*#\?Compression.*/Compression yes/' \
         -e '/^\s*Ciphers.*/d' \
@@ -1082,9 +1054,9 @@ remove_old_ssh_conf() {
         -e '/^\s*PermitTunnel/d' \
         -e '/^\s*X11Forwarding/d' "$SSH_PATH"
 
-    # Ensure Ciphers line is set correctly (only once)
+    # Add broad standard ciphers to prevent SSH handshake errors
     if ! grep -q "^Ciphers" "$SSH_PATH"; then
-        echo "Ciphers aes256-ctr,chacha20-poly1305@openssh.com" >> "$SSH_PATH"
+        echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr" >> "$SSH_PATH"
     fi
 }
 
@@ -1095,12 +1067,6 @@ update_sshd_conf() {
     echo
     sleep 0.5
 
-    # FIX: Reasonable keepalive (was 3000/100 = 83h timeout, unreasonable)
-    # 300s interval * 3 probes = 15min idle timeout, standard hardening
-    # FIX: Security-sensitive options disabled by default (was yes, insecure)
-    # Only TCPKeepAlive yes is kept; forwarding/tunneling/X11 disabled
-
-    # Helper to set or replace a directive idempotently
     set_sshd_opt() {
         local key="$1" val="$2"
         if grep -qE "^[[:space:]]*${key}[[:space:]]+" "$SSH_PATH"; then
@@ -1113,14 +1079,12 @@ update_sshd_conf() {
     set_sshd_opt "TCPKeepAlive" "yes"
     set_sshd_opt "ClientAliveInterval" "300"
     set_sshd_opt "ClientAliveCountMax" "3"
-    # Security: disable forwarding/tunneling by default - user can enable manually if needed
     set_sshd_opt "AllowTcpForwarding" "no"
     set_sshd_opt "GatewayPorts" "no"
     set_sshd_opt "PermitTunnel" "no"
     set_sshd_opt "X11Forwarding" "no"
     set_sshd_opt "AllowAgentForwarding" "no"
 
-    # FIX: Validate config before restart
     if sshd -t 2>/dev/null; then
         if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
             green_msg 'SSH is Optimized.'
@@ -1142,10 +1106,6 @@ limits_optimizations() {
     echo
     sleep 0.5
 
-    # FIX: Don't pollute /etc/profile with ulimit. Use limits.d and systemd.
-    # FIX: Only clean ulimit lines added by previous buggy optimizer, preserve user custom entries
-    # Old code used '/^ulimit/d' and '/ulimit -[cdef...]/d' which deleted ANY user ulimit
-    # Now we only delete the exact 14 lines the buggy script added (specific values)
     optimizer_ulimits=(
         "ulimit -c unlimited"
         "ulimit -d unlimited"
@@ -1172,8 +1132,6 @@ limits_optimizations() {
     if [ "$found_optimizer_entry" = true ]; then
         yellow_msg "Cleaning old optimizer ulimit entries from $PROF_PATH (preserving custom user entries)"
         cp "$PROF_PATH" "/etc/profile.bak.$(date +%F-%H%M%S)"
-        # FIX: Use exact-match filtering with whitespace trimming to avoid deleting user custom values
-        # e.g., user has "ulimit -n 65535" should be kept, only "ulimit -n 1048576" removed
         tmp_prof="${PROF_PATH}.tmp.$$"
         : > "$tmp_prof"
         while IFS= read -r line || [ -n "$line" ]; do
@@ -1196,7 +1154,7 @@ limits_optimizations() {
         yellow_msg "No optimizer ulimit entries found in $PROF_PATH, leaving custom entries untouched"
     fi
 
-    # Create limits.d config (proper way)
+    # Create limits.d config
     cat > "$LIMITS_CONF" <<'EOF'
 # /etc/security/limits.d/99-optimizer.conf - Fixed
 *               soft    nofile          1048576
@@ -1214,14 +1172,11 @@ root            hard    nofile          1048576
 EOF
     chmod 644 "$LIMITS_CONF"
 
-    # FIX: Also tune systemd defaults (system-wide)
-    # Backup and set in /etc/systemd/system.conf and user.conf if needed
+    # Tune systemd defaults
     for conf in /etc/systemd/system.conf /etc/systemd/user.conf; do
         if [ -f "$conf" ]; then
-            # Only set if not already tuned
             if ! grep -q "DefaultLimitNOFILE=1048576" "$conf"; then
                 cp "$conf" "${conf}.bak.$(date +%F-%H%M%S)" 2>/dev/null || true
-                # Remove old DefaultLimit entries to avoid duplicates
                 sed -i '/^DefaultLimitNOFILE/d' "$conf"
                 sed -i '/^DefaultLimitNPROC/d' "$conf"
                 sed -i '/^DefaultLimitMEMLOCK/d' "$conf"
@@ -1239,10 +1194,7 @@ EOF
         echo "session required pam_limits.so" >> /etc/pam.d/common-session
     fi
 
-    # Apply for current session (best effort)
     ulimit -n 1048576 2>/dev/null || ulimit -n 65536 2>/dev/null || true
-
-    # Reload systemd if available
     systemctl daemon-reload 2>/dev/null || true
 
     echo
@@ -1251,14 +1203,13 @@ EOF
     sleep 0.5
 }
 
-# UFW Optimizations - FIXED (removed UDP, fixed SSH_PORT handling, idempotent)
+# UFW Optimizations - FIXED
 ufw_optimizations() {
     echo
     yellow_msg 'Installing & Optimizing UFW...'
     echo
     sleep 0.5
 
-    # FIX: Don't purge firewalld blindly - only if exists and not needed
     if dpkg -l | grep -q firewalld 2>/dev/null; then
         yellow_msg "firewalld detected, purging to avoid conflict with UFW..."
         apt -y purge firewalld 2>/dev/null || true
@@ -1270,24 +1221,16 @@ ufw_optimizations() {
         return 1
     }
 
-    # Ensure SSH_PORT is set
     if [ -z "$SSH_PORT" ]; then
         find_ssh_port
     fi
-    # Validate SSH_PORT is numeric
     if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || [ "$SSH_PORT" -lt 1 ] || [ "$SSH_PORT" -gt 65535 ]; then
         red_msg "Invalid SSH port detected: $SSH_PORT, defaulting to 22"
         SSH_PORT=22
     fi
 
-    # Disable UFW temporarily to configure
     ufw --force disable 2>/dev/null || true
 
-    # FIX: Reset to avoid duplicate rules on re-run (optional but cleaner)
-    # ufw --force reset 2>/dev/null || true
-
-    # FIX: Only allow TCP - REMOVED UDP per request
-    # Delete existing rules for SSH to avoid duplicates
     ufw delete allow "$SSH_PORT" 2>/dev/null || true
     ufw delete allow "$SSH_PORT/tcp" 2>/dev/null || true
 
@@ -1295,31 +1238,21 @@ ufw_optimizations() {
     ufw allow 80/tcp comment 'HTTP' 2>/dev/null || ufw allow 80/tcp
     ufw allow 443/tcp comment 'HTTPS' 2>/dev/null || ufw allow 443/tcp
 
-    # Ensure we didn't leave UDP rules from previous buggy run - delete them
     ufw delete allow 80/udp 2>/dev/null || true
     ufw delete allow 443/udp 2>/dev/null || true
-    # Also delete generic 80,443 without proto if they imply both
-    # (ufw allow 80 without /tcp allows both - so we clean and re-add only tcp)
 
     sleep 0.5
 
-    # FIX: Don't blindly sed /etc/default/ufw - check if needed
-    # The original: s+/etc/ufw/sysctl.conf+/etc/sysctl.conf+gI breaks UFW's sysctl handling
-    # Better to leave UFW default or ensure it points to optimizer file
     if grep -q "/etc/ufw/sysctl.conf" /etc/default/ufw 2>/dev/null; then
-        yellow_msg "Leaving /etc/default/ufw sysctl path as default (UFW will use /etc/ufw/sysctl.conf, system uses /etc/sysctl.d/99-optimizer.conf)"
-        # Not changing it - original sed was harmful
+        yellow_msg "Leaving /etc/default/ufw sysctl path as default"
     fi
 
-    # Set default policies if not set (safe defaults)
     ufw default deny incoming 2>/dev/null || true
     ufw default allow outgoing 2>/dev/null || true
 
-    # Enable & Reload - non-interactive
     echo "y" | ufw --force enable 2>/dev/null || ufw --force enable
     ufw reload 2>/dev/null || true
 
-    # Show status
     ufw status verbose 2>/dev/null || ufw status
 
     echo
@@ -1328,7 +1261,7 @@ ufw_optimizations() {
     sleep 0.5
 }
 
-# Show the Menu - FIXED (removed XanMod)
+# Show the Menu
 show_menu() {
     echo
     yellow_msg 'Choose One Option: '
@@ -1374,7 +1307,7 @@ main() {
             installations
             enable_packages
             sleep 0.5
-            swap_make
+            swap_maker
             sleep 0.5
             sysctl_optimizations
             sleep 0.5
@@ -1396,7 +1329,7 @@ main() {
         3)
             complete_update
             sleep 0.5
-            swap_make
+            swap_maker
             sleep 0.5
             sysctl_optimizations
             sleep 0.5
@@ -1418,7 +1351,7 @@ main() {
         4)
             complete_update
             sleep 0.5
-            swap_make
+            swap_maker
             sleep 0.5
             sysctl_optimizations
             sleep 0.5
@@ -1456,7 +1389,7 @@ main() {
             ask_reboot
             ;;
         7)
-            swap_make
+            swap_maker
             sleep 0.5
             echo
             green_msg '========================='
@@ -1525,7 +1458,7 @@ main() {
     done
 }
 
-# Apply Everything - FIXED (no XanMod)
+# Apply Everything
 apply_everything() {
     complete_update
     sleep 0.5
@@ -1534,7 +1467,7 @@ apply_everything() {
     installations
     enable_packages
     sleep 0.5
-    swap_make
+    swap_maker
     sleep 0.5
     sysctl_optimizations
     sleep 0.5
