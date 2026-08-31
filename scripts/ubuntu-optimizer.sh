@@ -31,25 +31,24 @@ SWAP_SIZE="2G"
 LIMITS_CONF="/etc/security/limits.d/99-optimizer.conf"
 APT_UPDATED=0
 
-# Central package list guard - ensures only one update per script run (Option 1)
-# Preserves idempotency: standalone calls still update if flag is 0
+# Central package list guard
 apt_update_once() {
     if [ "$APT_UPDATED" = "1" ]; then
         yellow_msg "Skipping package list update (already done this run)"
         return 0
     fi
     yellow_msg "Running package list update..."
-    if apt -q update; then # apt update
+    export DEBIAN_FRONTEND=noninteractive
+    if apt-get -q update -y; then
         APT_UPDATED=1
         return 0
     else
         yellow_msg "package list update failed (will retry on next call)"
-        # Do not set flag, so next caller can retry
         return 1
     fi
 }
 
-# Root
+# Root check
 check_if_running_as_root() {
     if [[ "$(id -u)" -ne 0 ]]; then
       echo
@@ -91,11 +90,11 @@ complete_update() {
 
     export DEBIAN_FRONTEND=noninteractive
     apt_update_once || yellow_msg "package list update had warnings, continuing..."
-    apt -y upgrade
-    apt -y full-upgrade
-    apt -y autoremove --purge
-    apt -y autoclean
-    apt -y clean
+    apt-get -y upgrade
+    apt-get -y full-upgrade
+    apt-get -y autoremove --purge
+    apt-get -y autoclean
+    apt-get -y clean
 
     echo
     green_msg 'System Updated & Cleaned Successfully.'
@@ -123,7 +122,7 @@ disable_terminal_ads() {
     sleep 0.5
 }
 
-# Install useful packages - FIXED: per-package loop, single failure doesn't abort all
+# Install useful packages
 installations() {
     echo
     yellow_msg 'Installing Useful Packages...'
@@ -133,27 +132,19 @@ installations() {
     export DEBIAN_FRONTEND=noninteractive
     apt_update_once || yellow_msg "package list update had warnings, continuing..."
 
-    # FIX: Install packages individually so one missing package doesn't fail entire batch
-    # Common failure: preload, haveged, busybox, binutils-x86-64-linux-gnu removed on newer Ubuntu
     packages=(
-        # Networking
         apt-transport-https
-        # System utilities
         apt-utils bash-completion busybox ca-certificates cron curl gnupg2 locales lsb-release nano preload screen software-properties-common ufw unzip vim wget xxd zip
-        # Programming / dev tools
         autoconf automake build-essential git libtool make pkg-config python3 python3-pip
-        # Additional libs
         bc binutils binutils-common binutils-x86-64-linux-gnu ubuntu-keyring haveged jq libsodium-dev libsqlite3-dev libssl-dev packagekit qrencode socat
-        # Misc
         dialog htop net-tools
     )
 
     failed_pkgs=()
     for pkg in "${packages[@]}"; do
-        # Skip empty
         [ -z "$pkg" ] && continue
         yellow_msg "Installing $pkg ..."
-        if ! apt -y install "$pkg" 2>&1; then
+        if ! apt-get -y install "$pkg" 2>&1; then
             yellow_msg "Warning: failed to install $pkg, skipping (package may not exist on this release)"
             failed_pkgs+=("$pkg")
         fi
@@ -161,20 +152,19 @@ installations() {
 
     if [ ${#failed_pkgs[@]} -gt 0 ]; then
         yellow_msg "Some packages failed/skipped: ${failed_pkgs[*]}"
-        yellow_msg "This is normal on some Ubuntu/Debian releases (e.g., preload, haveged renamed)."
+        yellow_msg "This is normal on some Ubuntu/Debian releases."
     fi
 
     echo
-    green_msg 'Useful Packages Installed Succesfully.'
+    green_msg 'Useful Packages Installed Successfully.'
     echo
     sleep 0.5
 }
 
 # Enable packages at server boot
 enable_packages() {
-    # FIX: only enable services that exist
     for svc in cron haveged preload; do
-        if systemctl list-unit-files | grep -q "^${svc}.service"; then
+        if systemctl list-unit-files 2>/dev/null | grep -q "^${svc}.service"; then
             systemctl enable "$svc" 2>/dev/null || true
         fi
     done
@@ -184,21 +174,19 @@ enable_packages() {
     sleep 0.5
 }
 
-## Swap Maker - FIXED (nofail added to prevent boot hang/emergency mode)
+## Swap Maker - 100% Robust
 swap_maker() {
     echo
     yellow_msg 'Making SWAP Space...'
     echo
     sleep 0.5
 
-    # Validate SWAP_SIZE format (e.g., 2G, 1024M) - case-insensitive
     if ! [[ "$SWAP_SIZE" =~ ^[0-9]+[GMKgmk]?$ ]]; then
         red_msg "Invalid SWAP_SIZE: $SWAP_SIZE (use e.g., 2G)"
         return 1
     fi
 
-    # Check if swap already active on this path
-    if swapon --show=NAME --noheadings 2>/dev/null | grep -q "^${SWAP_PATH}$"; then
+    if grep -qs "$SWAP_PATH" /proc/swaps; then
         yellow_msg "Swap $SWAP_PATH is already active. Turning off to recreate..."
         swapoff "$SWAP_PATH" 2>/dev/null || {
             red_msg "Failed to swapoff $SWAP_PATH - maybe in use"
@@ -206,34 +194,28 @@ swap_maker() {
         }
     fi
 
-    # Check if file exists and remove old entry from fstab first to avoid duplicates
     if [ -f "$SWAP_PATH" ]; then
         yellow_msg "Old swap file found at $SWAP_PATH, removing..."
         rm -f "$SWAP_PATH"
     fi
 
-    # Remove duplicate fstab entries (FIX: prevent duplicate on re-run)
     if grep -qF "$SWAP_PATH" /etc/fstab; then
         yellow_msg "Removing old fstab entry for $SWAP_PATH"
-        # Backup fstab
         cp /etc/fstab "/etc/fstab.bak.$(date +%F-%H%M%S)"
         sed -i "\|$SWAP_PATH|d" /etc/fstab
     fi
 
-    # Check available disk space (need at least SWAP_SIZE + 100MB)
     swap_dir=$(dirname "$SWAP_PATH")
-    # Fallback to / if dirname doesn't exist yet
     [ -d "$swap_dir" ] || swap_dir="/"
-    # Use --output to be robust against df header variations
     avail_mb=$(df -m --output=avail "$swap_dir" 2>/dev/null | tail -n1 | tr -d ' ')
-    # Pure bash conversion of SWAP_SIZE to MB (no numfmt)
+    
     case "$SWAP_SIZE" in
         *G|*g) swap_mb=$((${SWAP_SIZE%[Gg]} * 1024)) ;;
         *M|*m) swap_mb=${SWAP_SIZE%[Mm]} ;;
         *K|*k) swap_mb=$((${SWAP_SIZE%[Kk]} / 1024)); [ "$swap_mb" -eq 0 ] && swap_mb=1 ;;
         *)     swap_mb=$((SWAP_SIZE / 1024 / 1024)); [ "$swap_mb" -eq 0 ] && swap_mb=2048 ;;
     esac
-    # Validate numeric
+
     if ! [[ "$avail_mb" =~ ^[0-9]+$ ]]; then
         yellow_msg "Warning: could not determine free space for $swap_dir, skipping space check"
     elif [ "$avail_mb" -lt $((swap_mb + 100)) ]; then
@@ -241,49 +223,53 @@ swap_maker() {
         return 1
     fi
 
-    # Allocate swap file - try fallocate, fallback to dd (fallocate fails on some FS like XFS, btrfs)
     yellow_msg "Allocating $SWAP_SIZE at $SWAP_PATH..."
-    if ! fallocate -l "$SWAP_SIZE" "$SWAP_PATH" 2>/dev/null; then
-        yellow_msg "fallocate failed, using dd (slower but compatible)..."
+    local created_with_fallocate=false
+    if fallocate -l "$SWAP_SIZE" "$SWAP_PATH" 2>/dev/null; then
+        created_with_fallocate=true
+    fi
+
+    chmod 600 "$SWAP_PATH"
+    if ! mkswap "$SWAP_PATH" 2>/dev/null || ! swapon "$SWAP_PATH" 2>/dev/null; then
+        if [ "$created_with_fallocate" = true ]; then
+            yellow_msg "Fallocate swap failed activation (filesystem hole issue). Retrying with dd..."
+            rm -f "$SWAP_PATH"
+        fi
         case "$SWAP_SIZE" in
             *G|*g) count=$((${SWAP_SIZE%[Gg]} * 1024)) ;;
             *M|*m) count=${SWAP_SIZE%[Mm]} ;;
             *K|*k) count=$((${SWAP_SIZE%[Kk]} / 1024)); [ "$count" -eq 0 ] && count=1 ;;
             *)     count=$((SWAP_SIZE / 1024 / 1024)); [ "$count" -eq 0 ] && count=2048 ;;
         esac
-        if ! dd if=/dev/zero of="$SWAP_PATH" bs=1M count="$count" status=progress; then
+        if ! dd if=/dev/zero of="$SWAP_PATH" bs=1M count="$count" status=none; then
             red_msg "Failed to create swap file via dd"
+            rm -f "$SWAP_PATH"
+            return 1
+        fi
+        chmod 600 "$SWAP_PATH"
+        if ! mkswap "$SWAP_PATH" || ! swapon "$SWAP_PATH"; then
+            red_msg "swapon failed - check dmesg"
             rm -f "$SWAP_PATH"
             return 1
         fi
     fi
 
-    chmod 600 "$SWAP_PATH"
-    if ! mkswap "$SWAP_PATH"; then
-        red_msg "mkswap failed"
-        rm -f "$SWAP_PATH"
-        return 1
-    fi
-    if ! swapon "$SWAP_PATH"; then
-        red_msg "swapon failed - check dmesg"
-        return 1
-    fi
-
-    # Add to fstab with nofail to prevent emergency mode on boot failure
+    # Safe fstab entry with nofail to guarantee clean boot
     if ! grep -qF "$SWAP_PATH" /etc/fstab; then
         echo "$SWAP_PATH   none    swap    sw,nofail    0   0" >> /etc/fstab
     fi
 
-    # Verify
-    swapon --show | grep -q "$SWAP_PATH" && green_msg "SWAP Created Successfully: $(swapon --show | grep "$SWAP_PATH")" || red_msg "SWAP creation verification failed"
+    if grep -qs "$SWAP_PATH" /proc/swaps; then
+        green_msg "SWAP Created & Activated Successfully."
+    else
+        red_msg "SWAP creation verification failed"
+    fi
 
-    echo
-    green_msg 'SWAP Created Successfully.'
     echo
     sleep 0.5
 }
 
-# SYSCTL Optimization - PROFILE BASED FOR VPN (balanced/high-throughput/low-latency/conservative/auto)
+# SYSCTL Optimization
 sysctl_optimizations() {
     local profile_input="${1:-}"
     local profile=""
@@ -298,7 +284,6 @@ sysctl_optimizations() {
     local timestamp
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%d %H:%M:%S")
     
-    # --- Helper: detect RAM GB ---
     detect_ram_gb() {
         local mem_kb
         mem_kb=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null)
@@ -373,14 +358,12 @@ sysctl_optimizations() {
                 _speed="$raw"
             fi
         fi
-        # Final validation: ensure numeric or unknown
         if [ "$_speed" != "unknown" ] && ! [[ "$_speed" =~ ^[0-9]+$ ]]; then
             _speed="unknown"
         fi
         echo "$_speed"
     }
     
-    # --- Profile validation and selection ---
     if [ -n "$profile_input" ]; then
         case "$profile_input" in
             balanced|vpn-high-throughput|vpn-low-latency|conservative|auto)
@@ -393,7 +376,6 @@ sysctl_optimizations() {
                 ;;
         esac
     else
-        # No argument supplied
         if [ -t 0 ]; then
             echo
             yellow_msg "Select sysctl profile:"
@@ -424,13 +406,11 @@ sysctl_optimizations() {
         fi
     fi
     
-    # Gather detection info for header and auto selection (needed for all profiles for logging)
     ram_gb=$(detect_ram_gb)
     cpu_cores=$(detect_cpu_cores)
     iface=$(detect_primary_iface)
     speed=$(detect_link_speed "$iface")
     
-    # Ensure ram_gb and cpu_cores are numeric for calculations, fallback to 2GB/1 core if unknown
     local ram_gb_num=2
     if [[ "$ram_gb" =~ ^[0-9]+$ ]]; then
         ram_gb_num="$ram_gb"
@@ -440,7 +420,6 @@ sysctl_optimizations() {
         cpu_cores_num="$cpu_cores"
     fi
     
-    # Auto selection logic
     if [ "$profile" = "auto" ]; then
         if [[ "$ram_gb" =~ ^[0-9]+$ ]] && [ "$ram_gb" -ge 8 ] && [ "$cpu_cores_num" -ge 4 ]; then
             selected_profile="vpn-high-throughput"
@@ -456,7 +435,6 @@ sysctl_optimizations() {
                 auto_reason="default (RAM ${ram_gb}GB, CPU ${cpu_cores} cores, speed ${speed}Mb/s <1Gbps)"
             fi
         fi
-        # Print auto detection details as required
         echo
         yellow_msg "Auto detection:"
         echo "  Detected RAM: ${ram_gb} GB"
@@ -475,14 +453,12 @@ sysctl_optimizations() {
     echo
     sleep 0.5
     
-    # Preserve existing idempotent backup behavior for legacy sysctl.conf (portable, without nonportable flag)
     if [ -f "$SYS_PATH" ]; then
         _backup_dest="/etc/sysctl.conf.bak.$(date +%F-%H%M%S)"
         [ -f "$_backup_dest" ] || cp "$SYS_PATH" "$_backup_dest" 2>/dev/null || cp "$SYS_PATH" "/etc/sysctl.conf.bak" 2>/dev/null || true
         green_msg "Backup of sysctl.conf created."
     fi
     
-    # BBR detection (preserve existing)
     TCP_CC="bbr"
     if ! sysctl net.ipv4.tcp_available_congestion_control 2>/dev/null | grep -qw bbr; then
         modprobe tcp_bbr 2>/dev/null || true
@@ -492,9 +468,7 @@ sysctl_optimizations() {
         fi
     fi
     
-    # QDISC detection - real fq capability (fixed: do not rely on directory test for default_qdisc)
     QDISC="fq_codel"
-    # Detect active/default interface for qdisc test where appropriate (use already detected $iface if available, else detect)
     local _qdisc_iface="$iface"
     if [ -z "$_qdisc_iface" ] || [ "$_qdisc_iface" = "unknown" ]; then
         if command -v ip >/dev/null 2>&1; then
@@ -503,17 +477,14 @@ sysctl_optimizations() {
         fi
         [ -z "$_qdisc_iface" ] && _qdisc_iface="lo"
     fi
-    # Attempt to load sch_fq when available (do not fail if modprobe unavailable)
     if command -v modprobe >/dev/null 2>&1; then
         modprobe sch_fq 2>/dev/null || true
     fi
-    # Verify fq is actually usable before selecting it (prefer fq, fallback fq_codel)
     if lsmod 2>/dev/null | grep -qw "sch_fq"; then
         QDISC="fq"
     elif command -v modinfo >/dev/null 2>&1 && modinfo sch_fq >/dev/null 2>&1; then
         QDISC="fq"
     elif command -v tc >/dev/null 2>&1; then
-        # Test fq via tc on lo (safe, cleanup afterwards)
         if tc qdisc add dev lo root fq 2>/dev/null; then
             tc qdisc del dev lo root 2>/dev/null || true
             QDISC="fq"
@@ -532,11 +503,9 @@ sysctl_optimizations() {
         QDISC="fq_codel"
     fi
     
-    # RAM-aware memory settings
     local tcp_mem=""
     local udp_mem=""
     local min_free_kbytes=""
-    # Determine based on RAM and profile
     case "$selected_profile" in
         balanced)
             if [ "$ram_gb_num" -lt 2 ]; then
@@ -602,13 +571,11 @@ sysctl_optimizations() {
             ;;
     esac
     
-    # Check busy_poll support for low-latency (conservative, only if kernel supports)
     local busy_poll_supported=0
     if sysctl -n net.core.busy_poll >/dev/null 2>&1; then
         busy_poll_supported=1
     fi
     
-    # Generate profile-specific config (OVERWRITE, never append)
     local header_info
     header_info="# Generated: $timestamp
 # Selected profile: $selected_profile
@@ -632,11 +599,14 @@ sysctl_optimizations() {
 $header_info
 ################################################################
 # Profile: balanced - General-purpose VPN/server (stable + good perf)
-# Moderate buffers, BBR+$QDISC when supported, safe limits
 ################################################################
 
 # File system
 fs.file-max = 67108864
+
+# Packet forwarding for VPN/Tunnels/Docker
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 
 # Network core - moderate
 net.core.default_qdisc = $QDISC
@@ -667,7 +637,7 @@ net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
 net.ipv4.tcp_syncookies = 1
@@ -708,11 +678,14 @@ EOF
 $header_info
 ################################################################
 # Profile: vpn-high-throughput - High-bandwidth VPN, many conns
-# Larger buffers, BBR+$QDISC, RAM-aware, for >=8GB/>=4CPU or >=1Gbps
 ################################################################
 
 # File system
 fs.file-max = 67108864
+
+# Packet forwarding for VPN/Tunnels/Docker
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 
 # Network core - high throughput
 net.core.default_qdisc = $QDISC
@@ -743,7 +716,7 @@ net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
 net.ipv4.tcp_syncookies = 1
@@ -763,7 +736,7 @@ vm.dirty_ratio = 15
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security (rp_filter=2 loose mode prevents dropped packets on multi-interface/VPNs)
+# Network security (rp_filter=2 loose mode)
 net.ipv4.conf.default.rp_filter = 2
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
@@ -784,11 +757,14 @@ EOF
 $header_info
 ################################################################
 # Profile: vpn-low-latency - Low latency/jitter, smaller buffers
-# BBR+$QDISC, conservative busy_poll if supported
 ################################################################
 
 # File system
 fs.file-max = 67108864
+
+# Packet forwarding for VPN/Tunnels/Docker
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
 
 # Network core - low latency (smaller buffers)
 net.core.default_qdisc = $QDISC
@@ -819,7 +795,7 @@ net.ipv4.tcp_sack = 1
 net.ipv4.tcp_dsack = 1
 net.ipv4.tcp_slow_start_after_idle = 0
 net.ipv4.tcp_window_scaling = 1
-net.ipv4.tcp_adv_win_scale = -2
+net.ipv4.tcp_adv_win_scale = 1
 net.ipv4.tcp_ecn = 1
 net.ipv4.tcp_ecn_fallback = 1
 net.ipv4.tcp_syncookies = 1
@@ -839,7 +815,7 @@ vm.dirty_ratio = 10
 vm.overcommit_memory = 0
 vm.overcommit_ratio = 50
 
-# Network security (rp_filter=2 loose mode prevents dropped packets on multi-interface/VPNs)
+# Network security (rp_filter=2 loose mode)
 net.ipv4.conf.default.rp_filter = 2
 net.ipv4.conf.all.rp_filter = 2
 net.ipv4.conf.all.accept_source_route = 0
@@ -851,10 +827,9 @@ net.ipv4.neigh.default.gc_stale_time = 60
 kernel.panic = 1
 
 EOF
-            # Add conservative busy_poll only if supported
             if [ "$busy_poll_supported" = "1" ]; then
                 {
-                    echo "# Busy poll - conservative (only if supported, low CPU impact)"
+                    echo "# Busy poll - conservative"
                     echo "net.core.busy_poll = 50"
                     echo "net.core.busy_read = 50"
                 } >> "$SYS_OPTIMIZER_PATH"
@@ -871,19 +846,22 @@ EOF
 $header_info
 ################################################################
 # Profile: conservative - Minimal changes, safe improvements only
-# Preserves kernel defaults where practical
 ################################################################
 
 # File system - minimal increase
 fs.file-max = 2097152
 
-# Network core - conservative (small safe increases)
+# Packet forwarding
+net.ipv4.ip_forward = 1
+net.ipv6.conf.all.forwarding = 1
+
+# Network core - conservative
 net.core.default_qdisc = $QDISC
 net.core.netdev_max_backlog = 5000
 net.core.optmem_max = 204800
 net.core.somaxconn = 4096
 
-# TCP - conservative (only safe improvements)
+# TCP - conservative
 net.ipv4.tcp_congestion_control = $TCP_CC
 net.ipv4.tcp_fin_timeout = 30
 net.ipv4.tcp_keepalive_time = 720
@@ -915,12 +893,11 @@ EOF
             ;;
     esac
     
-    # Validate generated configuration (basic syntax, no duplicates)
     if [ ! -s "$SYS_OPTIMIZER_PATH" ]; then
         red_msg "Generated sysctl config is empty!"
         return 1
     fi
-    # Check for duplicate keys (excluding comments/empty)
+    
     local dup_keys
     dup_keys=$(grep -v "^#" "$SYS_OPTIMIZER_PATH" | grep -v "^$" | cut -d= -f1 | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | sort | uniq -d)
     if [ -n "$dup_keys" ]; then
@@ -929,29 +906,20 @@ EOF
         return 1
     fi
     
-    # Backup/cleanup legacy sysctl.conf: remove only optimizer-managed keys
     if grep -q "99-optimizer" "$SYS_PATH" 2>/dev/null; then
         sed -i '/99-optimizer/d' "$SYS_PATH"
     fi
-    # Check for old optimizer block marker (legacy)
-    if grep -q "File system settings" "$SYS_PATH" 2>/dev/null || grep -q "Generated by Linux-Optimizer" "$SYS_PATH" 2>/dev/null; then
-        yellow_msg "Cleaning old optimizer block from $SYS_PATH (now using $SYS_OPTIMIZER_PATH)"
-        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.core.busy_poll net.core.busy_read net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
-            sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
-        done
-    else
-        for key in fs.file-max net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
-            if grep -q "^${key}[[:space:]]*=" "$SYS_PATH" 2>/dev/null; then
-                if grep -q "^${key}[[:space:]]*=" "$SYS_OPTIMIZER_PATH" 2>/dev/null; then
-                    sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
-                fi
+    
+    for key in fs.file-max net.ipv4.ip_forward net.ipv6.conf.all.forwarding net.core.default_qdisc net.core.netdev_max_backlog net.core.optmem_max net.core.somaxconn net.core.rmem_max net.core.wmem_max net.core.rmem_default net.core.wmem_default net.core.busy_poll net.core.busy_read net.ipv4.tcp_rmem net.ipv4.tcp_wmem net.ipv4.tcp_congestion_control net.ipv4.tcp_fin_timeout net.ipv4.tcp_keepalive_time net.ipv4.tcp_keepalive_probes net.ipv4.tcp_keepalive_intvl net.ipv4.tcp_max_orphans net.ipv4.tcp_max_syn_backlog net.ipv4.tcp_max_tw_buckets net.ipv4.tcp_mem net.ipv4.tcp_mtu_probing net.ipv4.tcp_notsent_lowat net.ipv4.tcp_retries2 net.ipv4.tcp_sack net.ipv4.tcp_dsack net.ipv4.tcp_slow_start_after_idle net.ipv4.tcp_window_scaling net.ipv4.tcp_adv_win_scale net.ipv4.tcp_ecn net.ipv4.tcp_ecn_fallback net.ipv4.tcp_syncookies net.ipv4.tcp_fastopen net.ipv4.udp_mem net.unix.max_dgram_qlen vm.min_free_kbytes vm.swappiness vm.vfs_cache_pressure net.ipv4.conf.default.rp_filter net.ipv4.conf.all.rp_filter net.ipv4.conf.all.accept_source_route net.ipv4.conf.default.accept_source_route net.ipv4.neigh.default.gc_thresh1 net.ipv4.neigh.default.gc_thresh2 net.ipv4.neigh.default.gc_thresh3 net.ipv4.neigh.default.gc_stale_time kernel.panic vm.dirty_ratio vm.overcommit_memory vm.overcommit_ratio; do
+        if grep -q "^${key}[[:space:]]*=" "$SYS_PATH" 2>/dev/null; then
+            if grep -q "^${key}[[:space:]]*=" "$SYS_OPTIMIZER_PATH" 2>/dev/null; then
+                sed -i "/^${key//./\\.}[[:space:]]*=/d" "$SYS_PATH"
             fi
-        done
-    fi
+        fi
+    done
     
     chmod 644 "$SYS_OPTIMIZER_PATH"
     
-    # Apply: sysctl --system with graceful handling of unsupported keys
     echo
     yellow_msg "Applying sysctl settings (profile: $selected_profile)..."
     local apply_log
@@ -983,7 +951,7 @@ EOF
         else
             red_msg "sysctl -p also reported errors:"
             cat "$p_log"
-            yellow_msg "Continuing - check $SYS_OPTIMIZER_PATH, unsupported keys ignored"
+            yellow_msg "Continuing - unsupported keys ignored"
         fi
         rm -f "$p_log"
     fi
@@ -995,39 +963,36 @@ EOF
     sleep 0.5
 }
 
-# Function to find the SSH port and set it in the SSH_PORT variable
+# Find SSH port
 find_ssh_port() {
     echo
     yellow_msg "Finding SSH port..."
     echo
 
     SSH_PORT=""
-    if [ -e "$SSH_PATH" ]; then
+    if command -v sshd >/dev/null 2>&1; then
+        detected=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | tail -n1)
+        [ -n "$detected" ] && SSH_PORT="$detected"
+    fi
+    if [ -z "$SSH_PORT" ] && [ -e "$SSH_PATH" ]; then
         SSH_PORT=$(grep -E "^\s*Port\s+[0-9]+" "$SSH_PATH" 2>/dev/null | awk '{print $2}' | tail -n1)
-        if command -v sshd >/dev/null 2>&1; then
-            detected=$(sshd -T 2>/dev/null | awk '/^port / {print $2}' | tail -n1)
-            [ -n "$detected" ] && SSH_PORT="$detected"
-        fi
+    fi
 
-        if [ -n "$SSH_PORT" ]; then
-            echo
-            green_msg "SSH port found: $SSH_PORT"
-            echo
-            sleep 0.5
-        else
-            echo
-            green_msg "SSH port is default 22."
-            echo
-            SSH_PORT=22
-            sleep 0.5
-        fi
+    if [ -n "$SSH_PORT" ]; then
+        echo
+        green_msg "SSH port found: $SSH_PORT"
+        echo
+        sleep 0.5
     else
-        red_msg "SSH configuration file not found at $SSH_PATH, assuming 22"
+        echo
+        green_msg "SSH port is default 22."
+        echo
         SSH_PORT=22
+        sleep 0.5
     fi
 }
 
-# Remove old SSH config to prevent duplicates.
+# Remove old SSH config
 remove_old_ssh_conf() {
     if [ ! -f "$SSH_PATH" ]; then
         red_msg "SSH config not found, skipping backup"
@@ -1039,7 +1004,6 @@ remove_old_ssh_conf() {
     echo
     sleep 1
 
-    # Clean directives we will re-add
     sed -i -e 's/^\s*#\?UseDNS.*/UseDNS no/' \
         -e 's/^\s*#\?Compression.*/Compression yes/' \
         -e '/^\s*Ciphers.*/d' \
@@ -1054,13 +1018,12 @@ remove_old_ssh_conf() {
         -e '/^\s*PermitTunnel/d' \
         -e '/^\s*X11Forwarding/d' "$SSH_PATH"
 
-    # Add broad standard ciphers to prevent SSH handshake errors
     if ! grep -q "^Ciphers" "$SSH_PATH"; then
         echo "Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes128-gcm@openssh.com,aes256-ctr,aes192-ctr,aes128-ctr" >> "$SSH_PATH"
     fi
 }
 
-# Update SSH config - FIXED: reasonable keepalive, secure defaults
+# Update SSH config
 update_sshd_conf() {
     echo
     yellow_msg 'Optimizing SSH...'
@@ -1079,11 +1042,11 @@ update_sshd_conf() {
     set_sshd_opt "TCPKeepAlive" "yes"
     set_sshd_opt "ClientAliveInterval" "300"
     set_sshd_opt "ClientAliveCountMax" "3"
-    set_sshd_opt "AllowTcpForwarding" "no"
+    set_sshd_opt "AllowTcpForwarding" "yes"
     set_sshd_opt "GatewayPorts" "no"
     set_sshd_opt "PermitTunnel" "no"
     set_sshd_opt "X11Forwarding" "no"
-    set_sshd_opt "AllowAgentForwarding" "no"
+    set_sshd_opt "AllowAgentForwarding" "yes"
 
     if sshd -t 2>/dev/null; then
         if systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; then
@@ -1099,7 +1062,7 @@ update_sshd_conf() {
     sleep 0.5
 }
 
-# System Limits Optimizations - FIXED
+# System Limits Optimizations
 limits_optimizations() {
     echo
     yellow_msg 'Optimizing System Limits...'
@@ -1154,7 +1117,6 @@ limits_optimizations() {
         yellow_msg "No optimizer ulimit entries found in $PROF_PATH, leaving custom entries untouched"
     fi
 
-    # Create limits.d config
     cat > "$LIMITS_CONF" <<'EOF'
 # /etc/security/limits.d/99-optimizer.conf - Fixed
 *               soft    nofile          1048576
@@ -1172,7 +1134,6 @@ root            hard    nofile          1048576
 EOF
     chmod 644 "$LIMITS_CONF"
 
-    # Tune systemd defaults
     for conf in /etc/systemd/system.conf /etc/systemd/user.conf; do
         if [ -f "$conf" ]; then
             if ! grep -q "DefaultLimitNOFILE=1048576" "$conf"; then
@@ -1189,7 +1150,6 @@ EOF
         fi
     done
 
-    # Ensure pam_limits is enabled
     if [ -f /etc/pam.d/common-session ] && ! grep -q "pam_limits.so" /etc/pam.d/common-session; then
         echo "session required pam_limits.so" >> /etc/pam.d/common-session
     fi
@@ -1203,7 +1163,7 @@ EOF
     sleep 0.5
 }
 
-# UFW Optimizations - FIXED
+# UFW Optimizations
 ufw_optimizations() {
     echo
     yellow_msg 'Installing & Optimizing UFW...'
@@ -1212,11 +1172,11 @@ ufw_optimizations() {
 
     if dpkg -l | grep -q firewalld 2>/dev/null; then
         yellow_msg "firewalld detected, purging to avoid conflict with UFW..."
-        apt -y purge firewalld 2>/dev/null || true
+        apt-get -y purge firewalld 2>/dev/null || true
     fi
 
     apt_update_once || yellow_msg "package list update had warnings, continuing..."
-    apt install -y ufw 2>/dev/null || {
+    apt-get install -y ufw 2>/dev/null || {
         red_msg "UFW install failed"
         return 1
     }
@@ -1243,8 +1203,9 @@ ufw_optimizations() {
 
     sleep 0.5
 
-    if grep -q "/etc/ufw/sysctl.conf" /etc/default/ufw 2>/dev/null; then
-        yellow_msg "Leaving /etc/default/ufw sysctl path as default"
+    # FIX: Allow routed traffic through UFW for VPNs, Tunnels and Docker
+    if [ -f /etc/default/ufw ]; then
+        sed -i 's/DEFAULT_FORWARD_POLICY="DROP"/DEFAULT_FORWARD_POLICY="ACCEPT"/g' /etc/default/ufw
     fi
 
     ufw default deny incoming 2>/dev/null || true
@@ -1256,12 +1217,12 @@ ufw_optimizations() {
     ufw status verbose 2>/dev/null || ufw status
 
     echo
-    green_msg 'UFW is Installed & Optimized. (Only TCP 80,443 + SSH:'"$SSH_PORT"'/tcp opened. UDP removed.)'
+    green_msg 'UFW is Installed & Optimized. (Only TCP 80,443 + SSH:'"$SSH_PORT"'/tcp opened. Forwarding enabled.)'
     echo
     sleep 0.5
 }
 
-# Show the Menu
+# Show Menu
 show_menu() {
     echo
     yellow_msg 'Choose One Option: '
@@ -1287,7 +1248,7 @@ show_menu() {
     echo
 }
 
-# Choosing Program
+# Main Execution Loop
 main() {
     while true; do
         show_menu
