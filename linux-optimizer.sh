@@ -1,48 +1,41 @@
 #!/bin/bash
 
-
 clear
-
 
 # Green, Yellow & Red Messages.
 green_msg() {
-    tput setaf 2
+    tput setaf 2 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
 
 yellow_msg() {
-    tput setaf 3
+    tput setaf 3 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
 
 red_msg() {
-    tput setaf 1
+    tput setaf 1 2>/dev/null
     echo "[*] ----- $1"
-    tput sgr0
+    tput sgr0 2>/dev/null
 }
-
 
 # Paths
 HOST_PATH="/etc/hosts"
-
 
 # Intro
 echo 
 green_msg '================================================================='
 green_msg 'This script will automatically Optimize your Linux Server.'
-green_msg 'Tested on: Ubuntu 20+, Debian 11+, CentOS stream 8+, AlmaLinux 8+, Fedora 37+'
+green_msg 'Tested on: Ubuntu 20+, Debian 11+, CentOS 8+, AlmaLinux, Rocky, Fedora'
 green_msg 'Root access is required.' 
-green_msg 'Source is @ https://github.com/KanekiDevPro/linux-optimizer' 
 green_msg '================================================================='
 echo 
 
-
 # Check Root Function
 check_if_running_as_root() {
-    # If you want to run as another user, please modify $EUID to be owned by this user
-    if [[ "$EUID" -ne '0' ]]; then
+    if [[ "$EUID" -ne 0 ]]; then
       echo 
       red_msg 'Error: You must run this script as root!'
       echo 
@@ -51,38 +44,19 @@ check_if_running_as_root() {
     fi
 }
 
-
-# Run Check Root
 check_if_running_as_root
 sleep 0.5
 
-
-# Install dependencies
+# Install dependencies (Debian/Ubuntu)
 install_dependencies_debian_based() {
   echo 
   yellow_msg 'Installing Dependencies...'
   echo 
   sleep 0.5
   
-  apt update -q
-  apt install -yq wget curl sudo jq
-
-  echo
-  green_msg 'Dependencies Installed.'
-  echo 
-  sleep 0.5
-}
-
-
-# Install dependencies
-install_dependencies_rhel_based() {
-  echo 
-  yellow_msg 'Installing Dependencies...'
-  echo 
-  sleep 0.5
-
-  # dnf up -y
-  dnf install -y wget curl sudo jq
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -q -y
+  apt-get install -yq wget curl sudo jq net-tools
   
   echo
   green_msg 'Dependencies Installed.'
@@ -90,24 +64,42 @@ install_dependencies_rhel_based() {
   sleep 0.5
 }
 
+# Install dependencies (RHEL/CentOS/Alma/Rocky/Fedora)
+install_dependencies_rhel_based() {
+  echo 
+  yellow_msg 'Installing Dependencies...'
+  echo 
+  sleep 0.5
+
+  if command -v dnf >/dev/null 2>&1; then
+      dnf install -y wget curl sudo jq net-tools
+  else
+      yum install -y wget curl sudo jq net-tools
+  fi
+  
+  echo
+  green_msg 'Dependencies Installed.'
+  echo 
+  sleep 0.5
+}
 
 # Fix Hosts file
 fix_etc_hosts(){
   echo
-  yellow_msg "Fixing Hosts file."
+  yellow_msg "Fixing Hosts file..."
   sleep 0.5
 
   if [ ! -f /etc/hosts.bak ]; then
     cp "$HOST_PATH" /etc/hosts.bak
-    yellow_msg "Default hosts file saved. Directory: /etc/hosts.bak"
-  else
-    yellow_msg "Backup /etc/hosts.bak already exists; not overwriting."
+    yellow_msg "Default hosts file saved to /etc/hosts.bak"
   fi
-  sleep 0.5
 
-  if ! grep -qF "$(hostname)" "$HOST_PATH"; then
-    echo "127.0.1.1 $(hostname)" >> "$HOST_PATH"
-    green_msg "Hosts Fixed."
+  local hname
+  hname=$(hostname)
+
+  if ! grep -qw "$hname" "$HOST_PATH" 2>/dev/null; then
+    echo "127.0.1.1 $hname" >> "$HOST_PATH"
+    green_msg "Hosts Fixed (Added 127.0.1.1 $hname)."
   else
     green_msg "Hosts OK. No changes made."
   fi
@@ -121,9 +113,8 @@ fix_etc_hosts(){
 
 TS=$(date +%Y%m%d-%H%M%S)
 
-# ---- DNS subsystem globals (used for exact, safe rollback) ----
 DNS_NAME=""; DNS_V4=""; DNS_V6=""; DOT_PAIRS=""
-DOT_MODE="disabled"          # disabled | opportunistic | opportunistic-unknown
+DOT_MODE="disabled"
 METHOD="direct"
 
 RESOLV_SNAPSHOT_DONE=0
@@ -137,12 +128,11 @@ RESOLVED_DROPIN_WRITTEN=0
 RESOLVED_DROPIN_EXISTED=0
 RESOLVED_MAIN_CLEANED=0
 
-NM_CHANGES=()                # entries: "name|dev|old_dns4|old_ign4|old_dns6|old_ign6"
+NM_CHANGES=()
 NM_APPLIED=0
 NM_DNSNONE_DROPIN="/etc/NetworkManager/conf.d/99-linux-optimizer-dnsnone.conf"
 NM_DNSNONE_CREATED=0
 
-# ---- Persistence (networkd-dispatcher + netplan) ----
 DNS_STATE_DIR="/var/lib/linux-optimizer"
 DNS_STATE_FILE="$DNS_STATE_DIR/dns.env"
 NETWORKD_DISPATCHER_HOOK="/etc/networkd-dispatcher/routable.d/70-linux-optimizer-dns"
@@ -153,11 +143,6 @@ NETPLAN_DNS_FILE="/etc/netplan/99-linux-optimizer-dns.yaml"
 NETPLAN_FILE_CREATED=0
 NETPLAN_APPLIED=0
 
-# ---- DNS database ---------------------------------------------------
-# Format: "IPv4_servers|IPv6_servers|DoT_pairs"
-# DoT_pairs: space-separated "IP=SNI" entries (used only by systemd-resolved
-# with systemd >= 247). Option 2 (Anti-Malware) and option 14 (Mix) mappings
-# are intentionally distinct: 1.1.1.2 != 1.1.1.1.
 get_dns_list() {
     case "$1" in
         1)  echo "1.1.1.1 1.0.0.1|2606:4700:4700::1111 2606:4700:4700::1001|1.1.1.1=1dot1dot1dot1.cloudflare-dns.com 1.0.0.1=1dot1dot1dot1.cloudflare-dns.com 2606:4700:4700::1111=1dot1dot1dot1.cloudflare-dns.com 2606:4700:4700::1001=1dot1dot1dot1.cloudflare-dns.com" ;;
@@ -192,10 +177,7 @@ get_dns_name() {
     esac
 }
 
-# ---- Generic helpers -------------------------------------------------
-
 dedup_list() {
-    # Deduplicate space separated tokens, preserving order.
     local seen=" " out="" tok
     for tok in $1; do
         [[ "$seen" == *" $tok "* ]] && continue
@@ -218,7 +200,6 @@ valid_ipv4() {
 }
 
 valid_ip() {
-    # valid_ip <4|6> <address>  — python3 first, regex fallback.
     local fam="$1" ip="$2"
     if command -v python3 >/dev/null 2>&1; then
         python3 - "$fam" "$ip" <<'PYEOF' >/dev/null 2>&1
@@ -240,8 +221,6 @@ PYEOF
 }
 
 read_validated_dns() {
-    # read_validated_dns <4|6> <prompt> <required 1|0>
-    # Prints validated, deduplicated list to stdout; ALL messages go to stderr.
     local fam="$1" prompt="$2" required="$3"
     local input ip bad valid
     while true; do
@@ -270,7 +249,6 @@ read_validated_dns() {
 }
 
 build_resolved_dns_value() {
-    # build_resolved_dns_value <DoT pairs> <servers>  -> "ip[#sni] ..." list
     local pairs="$1" ip sni p out=""
     for ip in $2; do
         sni=""
@@ -328,8 +306,6 @@ print_selection_summary() {
     echo "  $(detect_dns_method)"
 }
 
-# ---- Menu -------------------------------------------------------------
-
 choose_dns() {
     echo
     yellow_msg "Select a DNS configuration:"
@@ -367,7 +343,7 @@ parse_dns_choice() {
         DNS_V6=$(read_validated_dns 6 "[*] Enter IPv6 DNS servers (optional, blank to skip): " 0)
         DOT_PAIRS=""
         local CUSTOM_DOT
-        read -r -p "[*] DoT hostname(s) for these servers (optional, comma/space separated, same order; blank = no DoT): " CUSTOM_DOT </dev/tty || CUSTOM_DOT=""
+        read -r -p "[*] DoT hostname(s) for these servers (optional, blank = no DoT): " CUSTOM_DOT </dev/tty || CUSTOM_DOT=""
         CUSTOM_DOT=${CUSTOM_DOT//,/ }
         if [ -n "$CUSTOM_DOT" ]; then
             local -a allsrv
@@ -397,8 +373,6 @@ parse_dns_choice() {
     return 0
 }
 
-# ---- Manager detection & /etc/resolv.conf safety ----------------------
-
 resolv_conf_is_resolved_stub() {
     if [ -L /etc/resolv.conf ]; then
         [[ "$(readlink /etc/resolv.conf)" == *"systemd/resolve"* ]] && return 0
@@ -421,7 +395,6 @@ detect_dns_method() {
         nm_active=1
     fi
     if [ "$resolved_active" = "1" ]; then
-        # If NM directly owns resolv.conf, configure NM (the actual manager).
         if [ "$nm_active" = "1" ] && [ -L /etc/resolv.conf ] && [[ "$(readlink /etc/resolv.conf)" == *"NetworkManager"* ]]; then
             echo "networkmanager"
         else
@@ -476,25 +449,19 @@ write_resolvconf_direct() {
     return 0
 }
 
-# ---- systemd-resolved --------------------------------------------------
-
 clean_legacy_resolved_conf() {
-    # Remove ONLY active DNS/FallbackDNS/DNSOverTLS directives that previous
-    # optimizer versions wrote into the main resolved.conf (comments preserved).
     local f="/etc/systemd/resolved.conf"
     [ -f "$f" ] || return 0
     if grep -Eq '^[[:space:]]*(DNS|FallbackDNS|DNSOverTLS)=' "$f" 2>/dev/null; then
         cp "$f" "$f.bak.$TS" || { red_msg "Backup of resolved.conf failed."; return 1; }
         sed -i -E '/^[[:space:]]*(DNS|FallbackDNS|DNSOverTLS)=/d' "$f"
         RESOLVED_MAIN_CLEANED=1
-        yellow_msg "Removed legacy optimizer DNS directives from $f (backup: $f.bak.$TS)."
+        yellow_msg "Removed legacy optimizer DNS directives from $f."
     fi
     return 0
 }
 
 ensure_resolved_stub() {
-    # Keep the normal resolved-managed resolv.conf when present; repoint only
-    # as a last resort (previous state is already snapshotted).
     if [ -L /etc/resolv.conf ] && [[ "$(readlink /etc/resolv.conf)" == *"systemd/resolve"* ]]; then
         return 0
     fi
@@ -505,14 +472,11 @@ ensure_resolved_stub() {
     rm -f /etc/resolv.conf
     ln -s /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf || { red_msg "Failed to create stub symlink."; return 1; }
     RESOLV_MODIFIED=1
-    yellow_msg "/etc/resolv.conf repointed to the systemd-resolved stub (previous state saved)."
+    yellow_msg "/etc/resolv.conf repointed to the systemd-resolved stub."
     return 0
 }
 
 override_link_dns_runtime() {
-    # Best-effort runtime override of per-link (DHCP) DNS servers.
-    # NOTE: non-persistent; persistent override is done via NetworkManager
-    # profiles, netplan file, or the networkd-dispatcher hook.
     command -v resolvectl >/dev/null 2>&1 || return 0
     resolvectl flush-caches >/dev/null 2>&1 || true
     local link
@@ -529,8 +493,6 @@ networkd_active() {
 }
 
 persist_dns_state() {
-    # Persist selected DNS so it is re-applied after reboot/renew on
-    # netplan/networkd-based servers (Ubuntu Server default).
     [ -n "$DNS_V4" ] || return 0
     mkdir -p "$DNS_STATE_DIR" 2>/dev/null || return 0
 
@@ -541,48 +503,31 @@ persist_dns_state() {
     DNS_STATE_WRITTEN=1
 
     if networkd_active; then
-        if ! command -v networkd-dispatcher >/dev/null 2>&1; then
-            yellow_msg "Installing networkd-dispatcher (keeps DNS after reboot/renew)..."
-            if command -v apt-get >/dev/null 2>&1; then
-                DEBIAN_FRONTEND=noninteractive apt-get install -yq networkd-dispatcher >/dev/null 2>&1 || true
-            elif command -v dnf >/dev/null 2>&1; then
-                dnf install -y networkd-dispatcher >/dev/null 2>&1 || true
-            fi
-        fi
         if command -v networkd-dispatcher >/dev/null 2>&1; then
             mkdir -p "$(dirname "$NETWORKD_DISPATCHER_HOOK")" 2>/dev/null
             if [ ! -f "$NETWORKD_DISPATCHER_HOOK" ]; then
                 cat > "$NETWORKD_DISPATCHER_HOOK" <<'EOF'
 #!/bin/sh
-# Re-apply Linux-Optimizer DNS after link state changes (reboot/renew).
 [ -r /var/lib/linux-optimizer/dns.env ] || exit 0
 command -v resolvectl >/dev/null 2>&1 || exit 0
 [ -n "$DEVICE" ] || exit 0
 [ "$DEVICE" = "lo" ] && exit 0
 . /var/lib/linux-optimizer/dns.env
 [ -n "$OPT_DNS_ALL" ] || exit 0
-# shellcheck disable=SC2086
 resolvectl dns "$DEVICE" $OPT_DNS_ALL >/dev/null 2>&1 || true
 exit 0
 EOF
                 chmod 755 "$NETWORKD_DISPATCHER_HOOK"
                 DNS_HOOK_CREATED=1
-                green_msg "networkd-dispatcher hook installed - DNS persists after reboot."
-            else
-                green_msg "networkd-dispatcher hook already present."
+                green_msg "networkd-dispatcher hook installed."
             fi
             systemctl try-restart networkd-dispatcher >/dev/null 2>&1 || true
-        else
-            yellow_msg "networkd-dispatcher unavailable; DNS override may not survive reboot/renew."
         fi
     fi
     return 0
 }
 
 configure_netplan_dns() {
-    # Persistent link-level fix for netplan+networkd systems:
-    # stops DHCP/provider DNS (use-dns: false) and pins the selected servers.
-    # Only touches interfaces netplan actually owns (never creates new NIC config).
     command -v netplan >/dev/null 2>&1 || return 0
     networkd_active || return 0
     [ -d /etc/netplan ] || return 0
@@ -591,18 +536,15 @@ configure_netplan_dns() {
         return 0
     fi
 
-    local -a links=() skip=()
+    local -a links=()
     local l
     while read -r l; do
         [ -z "$l" ] || [ "$l" = "lo" ] && continue
         if ls /run/systemd/network/ 2>/dev/null | grep -qE "^[0-9]+-netplan-${l}\.network$"; then
             links+=("$l")
-        else
-            skip+=("$l")
         fi
     done < <(resolvectl status 2>/dev/null | awk '/^Link [0-9]+ \(/ {gsub(/[()]/,"",$3); sub(/:$/,"",$3); print $3}')
 
-    [ "${#skip[@]}" -gt 0 ] && yellow_msg "Not netplan-managed (runtime override + hook remain for them): ${skip[*]}"
     [ "${#links[@]}" -gt 0 ] || return 0
 
     local body="" i ip
@@ -622,19 +564,16 @@ configure_netplan_dns() {
     local new_content="network:"$'\n'"  version: 2"$'\n'"  ethernets:"$'\n'"$body"
 
     if [ -f "$NETPLAN_DNS_FILE" ] && [ "$(cat "$NETPLAN_DNS_FILE" 2>/dev/null)" = "$new_content" ]; then
-        green_msg "Netplan DNS override already up to date."
         return 0
     fi
 
     [ -f "$NETPLAN_DNS_FILE" ] && cp "$NETPLAN_DNS_FILE" "${NETPLAN_DNS_FILE}.bak.$TS"
 
-    printf '%s\n' "$new_content" > "$NETPLAN_DNS_FILE" || { red_msg "Failed to write $NETPLAN_DNS_FILE"; return 1; }
+    printf '%s\n' "$new_content" > "$NETPLAN_DNS_FILE" || return 1
     chmod 600 "$NETPLAN_DNS_FILE"
     NETPLAN_FILE_CREATED=1
 
-    # Validate BEFORE touching anything live
     if ! netplan generate >/dev/null 2>&1; then
-        red_msg "netplan validation failed - reverting our netplan file."
         if [ -f "${NETPLAN_DNS_FILE}.bak.$TS" ]; then
             mv "${NETPLAN_DNS_FILE}.bak.$TS" "$NETPLAN_DNS_FILE"
         else
@@ -643,93 +582,45 @@ configure_netplan_dns() {
         NETPLAN_FILE_CREATED=0
         return 0
     fi
-    green_msg "Netplan override written + validated: $NETPLAN_DNS_FILE"
-
-    local ans
-    read -r -p "[*] Apply netplan now? (brief link reconfiguration) [y/N]: " ans </dev/tty
-    if [[ "$ans" =~ ^[Yy]$ ]]; then
-        if netplan apply; then
-            NETPLAN_APPLIED=1
-            green_msg "netplan applied - DHCP/provider DNS disabled on: ${links[*]}"
-        else
-            red_msg "netplan apply failed - override activates on next reboot instead."
-        fi
-    else
-        yellow_msg "Live apply skipped - override activates on next reboot."
-    fi
+    green_msg "Netplan DNS override created: $NETPLAN_DNS_FILE (active on next reboot or manual apply)."
     return 0
 }
 
 apply_dns_systemd_resolved() {
-    yellow_msg "Method: systemd-resolved (drop-in: $RESOLVED_DROPIN)"
+    yellow_msg "Method: systemd-resolved"
 
     local dns_value DOT_ANS cont sv
     dns_value="$DNS_V4"
     [ -n "$DNS_V6" ] && dns_value="$DNS_V4 $DNS_V6"
 
-    echo
-    read -r -p "[*] Enable DNS-over-TLS? [y/N]: " DOT_ANS </dev/tty
-    if [[ "$DOT_ANS" =~ ^[Yy]$ ]]; then
-        if [ -n "$DOT_PAIRS" ]; then
-            sv=$(systemd_major_version)
-            if [ "$sv" -ge 247 ]; then
-                dns_value=$(build_resolved_dns_value "$DOT_PAIRS" "$dns_value")
-                DOT_MODE="opportunistic"
-                green_msg "DoT: opportunistic mode with SNI enabled."
-            else
-                red_msg "systemd >= 247 required for DoT server names (found: $sv). DoT disabled."
-            fi
-        else
-            red_msg "No verified DoT hostname exists for this provider."
-            read -r -p "[*] Continue with opportunistic DoT (may stay unencrypted)? [y/N]: " cont </dev/tty
-            if [[ "$cont" =~ ^[Yy]$ ]]; then
-                DOT_MODE="opportunistic-unknown"
-            else
-                yellow_msg "DoT disabled."
-            fi
-        fi
-    fi
-
-    # ---- Write the drop-in (exactly one [Resolve], idempotent) ----
+    # Write the drop-in
     local new_content
-    new_content="[Resolve]"$'\n'"DNS=$dns_value"
-    if [ "$DOT_MODE" != "disabled" ]; then
-        new_content+=$'\n'"DNSOverTLS=opportunistic"
-    fi
-    new_content+=$'\n'
+    new_content="[Resolve]"$'\n'"DNS=$dns_value"$'\n'
 
-    mkdir -p "$(dirname "$RESOLVED_DROPIN")" || { red_msg "Cannot create $(dirname "$RESOLVED_DROPIN")"; return 1; }
+    mkdir -p "$(dirname "$RESOLVED_DROPIN")" || return 1
     if [ -f "$RESOLVED_DROPIN" ]; then
-        if [ "$(cat "$RESOLVED_DROPIN" 2>/dev/null)" = "${new_content%$'\n'}" ]; then
-            green_msg "systemd-resolved drop-in already up to date."
-        else
+        if [ "$(cat "$RESOLVED_DROPIN" 2>/dev/null)" != "${new_content%$'\n'}" ]; then
             cp "$RESOLVED_DROPIN" "${RESOLVED_DROPIN}.bak.$TS" 2>/dev/null
             RESOLVED_DROPIN_EXISTED=1
-            printf '%s' "$new_content" > "$RESOLVED_DROPIN" || { red_msg "Failed to write $RESOLVED_DROPIN"; return 1; }
+            printf '%s' "$new_content" > "$RESOLVED_DROPIN"
             RESOLVED_DROPIN_WRITTEN=1
         fi
     else
-        printf '%s' "$new_content" > "$RESOLVED_DROPIN" || { red_msg "Failed to write $RESOLVED_DROPIN"; return 1; }
+        printf '%s' "$new_content" > "$RESOLVED_DROPIN"
         RESOLVED_DROPIN_WRITTEN=1
     fi
 
     clean_legacy_resolved_conf || return 1
 
-    # Drop-in/unit configuration changed -> daemon-reload BEFORE restart.
-    # If nothing changed (idempotent re-run), skip reload/restart entirely.
     if [ "$RESOLVED_DROPIN_WRITTEN" = "1" ] || [ "$RESOLVED_MAIN_CLEANED" = "1" ]; then
         systemctl daemon-reload >/dev/null 2>&1 || true
         systemctl restart systemd-resolved || { red_msg "systemd-resolved failed to restart."; return 1; }
         green_msg "systemd-resolved restarted with the new configuration."
-    else
-        green_msg "systemd-resolved configuration already correct; no restart needed."
     fi
 
     ensure_resolved_stub || return 1
 
-    # If NetworkManager manages the links, stop it from re-pushing DHCP DNS.
     if systemctl is-active --quiet NetworkManager 2>/dev/null && command -v nmcli >/dev/null 2>&1; then
-        yellow_msg "NetworkManager detected: disabling auto (DHCP) DNS on active profiles."
         nm_apply_dns_to_profiles
     fi
 
@@ -739,10 +630,7 @@ apply_dns_systemd_resolved() {
     return 0
 }
 
-# ---- NetworkManager -----------------------------------------------------
-
 nm_apply_dns_to_profiles() {
-    # Applies DNS ONLY to active, non-loopback NM connection profiles.
     local line name dev old idx od4 oi4 od6 oi6
     local -a parts
     NM_APPLIED=0
@@ -761,7 +649,6 @@ nm_apply_dns_to_profiles() {
         [ "$dev" = "lo" ] || [ "$dev" = "--" ] || [ -z "$dev" ] && continue
         [ "$name" = "lo" ] && continue
 
-        # Snapshot exact current profile values for rollback.
         od4=$(nmcli -g ipv4.dns connection show "$name" 2>/dev/null)
         oi4=$(nmcli -g ipv4.ignore-auto-dns connection show "$name" 2>/dev/null)
         od6=$(nmcli -g ipv6.dns connection show "$name" 2>/dev/null)
@@ -769,28 +656,19 @@ nm_apply_dns_to_profiles() {
         old="$od4|$oi4|$od6|$oi6"
 
         if ! nmcli connection modify "$name" ipv4.dns "$DNS_V4" ipv4.ignore-auto-dns yes >/dev/null 2>&1; then
-            red_msg "Could not modify profile '$name'; skipping."
             continue
         fi
-        # Only touch IPv6 when IPv6 DNS was actually selected.
         if [ -n "$DNS_V6" ]; then
             nmcli connection modify "$name" ipv6.dns "$DNS_V6" ipv6.ignore-auto-dns yes >/dev/null 2>&1 || true
         fi
 
         NM_CHANGES+=("$name|$dev|$old")
-
-        if nmcli device reapply "$dev" >/dev/null 2>&1; then
-            NM_APPLIED=1
-            green_msg "DNS applied to connection '$name' ($dev)."
-        else
-            yellow_msg "Profile '$name' saved; reapply failed for '$dev' (active after reconnect)."
-        fi
+        nmcli device reapply "$dev" >/dev/null 2>&1 && NM_APPLIED=1
     done < <(nmcli -t -f NAME,DEVICE connection show --active 2>/dev/null)
 }
 
 apply_dns_networkmanager() {
-    yellow_msg "Method: NetworkManager (active connections only)"
-
+    yellow_msg "Method: NetworkManager"
     NM_APPLIED=0
     nm_apply_dns_to_profiles
 
@@ -798,33 +676,23 @@ apply_dns_networkmanager() {
         if grep -q "nameserver ${DNS_V4%% *}" /etc/resolv.conf 2>/dev/null || resolv_conf_is_resolved_stub; then
             return 0
         fi
-        yellow_msg "Profiles updated but /etc/resolv.conf was not refreshed by NetworkManager."
-    elif [ "${#NM_CHANGES[@]}" -eq 0 ]; then
-        yellow_msg "No active NetworkManager connection profiles were found."
     fi
 
-    # ---- Intentional last-resort fallback: direct resolv.conf write ----
-    yellow_msg "Falling back to a direct /etc/resolv.conf write."
     write_resolvconf_direct || return 1
     RESOLV_MODIFIED=1
 
-    # Only in this intentional fallback do we stop NM from overwriting it.
     if systemctl is-active --quiet NetworkManager 2>/dev/null && [ ! -f "$NM_DNSNONE_DROPIN" ]; then
         mkdir -p "$(dirname "$NM_DNSNONE_DROPIN")" 2>/dev/null
         if printf '[main]\ndns=none\n' > "$NM_DNSNONE_DROPIN" 2>/dev/null; then
             NM_DNSNONE_CREATED=1
-            yellow_msg "Created $NM_DNSNONE_DROPIN (dns=none) so NM keeps this resolv.conf."
-            yellow_msg "Takes effect on next NetworkManager restart (not restarted now, to protect connectivity)."
             nmcli general reload >/dev/null 2>&1 || true
         fi
     fi
     return 0
 }
 
-# ---- resolvconf / direct ------------------------------------------------
-
 apply_dns_resolvconf() {
-    yellow_msg "Method: resolvconf-managed resolver"
+    yellow_msg "Method: resolvconf"
     if command -v resolvconf >/dev/null 2>&1 && resolvconf_is_managed; then
         resolvconf -d LinuxOptimizer >/dev/null 2>&1 || true
         {
@@ -837,7 +705,6 @@ apply_dns_resolvconf() {
             RESOLV_MODIFIED=1
             return 0
         fi
-        red_msg "resolvconf failed; falling back to direct write."
     fi
     write_resolvconf_direct || return 1
     RESOLV_MODIFIED=1
@@ -845,13 +712,11 @@ apply_dns_resolvconf() {
 }
 
 apply_dns_direct() {
-    yellow_msg "Method: direct /etc/resolv.conf (no resolver manager detected)"
+    yellow_msg "Method: direct /etc/resolv.conf"
     write_resolvconf_direct || return 1
     RESOLV_MODIFIED=1
     return 0
 }
-
-# ---- Verification & rollback ---------------------------------------------
 
 get_effective_dns() {
     case "$METHOD" in
@@ -868,55 +733,17 @@ get_effective_dns() {
 }
 
 dns_query_ok() {
-    timeout 8 getent hosts "$1" >/dev/null 2>&1
-}
-
-diagnose_dns_source() {
-    local ip hint
-    for ip in "$@"; do
-        if [ "$METHOD" = "systemd-resolved" ] && resolvectl status 2>/dev/null | grep -q -- "$ip"; then
-            hint="link-level DNS from DHCP (NetworkManager/systemd-networkd/netplan); runtime override applied, may return after reconnect"
-        elif systemctl is-active --quiet NetworkManager 2>/dev/null && nmcli -f IP4.DNS,IP6.DNS device show 2>/dev/null | grep -q -- "$ip"; then
-            hint="provided by NetworkManager via DHCP (device level)"
-        else
-            hint="likely from the DHCP lease / provider default configuration"
-        fi
-        echo "  - $ip: $hint"
-    done
+    timeout 6 getent hosts "$1" >/dev/null 2>&1
 }
 
 verify_dns() {
     sleep 1
     echo
-    yellow_msg "DNS verification"
-    echo "Selected DNS:       $DNS_NAME"
-    [ -n "$DNS_V4" ] && echo "  IPv4: $DNS_V4"
-    [ -n "$DNS_V6" ] && echo "  IPv6: $DNS_V6"
-    echo "Active DNS manager: $METHOD"
-    if [ "$METHOD" = "systemd-resolved" ]; then
-        echo "DNS-over-TLS:       $(dot_mode_desc)"
-    else
-        echo "DNS-over-TLS:       Not applicable (supported by systemd-resolved only)"
-    fi
+    yellow_msg "DNS verification..."
 
-    local effective missing unexpected ip
+    local effective
     effective=$(dedup_list "$(get_effective_dns 2>/dev/null | tr '\n' ' ')")
-    echo "Effective DNS:      ${effective:-(none visible yet)}"
-
-    missing=""
-    for ip in $DNS_V4 $DNS_V6; do
-        [[ " $effective " == *" $ip "* ]] || missing+="$ip "
-    done
-    [ -n "$missing" ] && yellow_msg "Not (yet) visible among effective DNS servers: $missing"
-
-    unexpected=""
-    for ip in $effective; do
-        [[ " $DNS_V4 $DNS_V6 " == *" $ip "* ]] || unexpected+="$ip "
-    done
-    if [ -n "$unexpected" ]; then
-        yellow_msg "Unexpected DNS servers detected (source diagnosis):"
-        diagnose_dns_source $unexpected
-    fi
+    echo "Effective DNS: ${effective:-(none visible yet)}"
 
     if dns_query_ok github.com || dns_query_ok google.com || dns_query_ok cloudflare.com; then
         green_msg "DNS test: PASS"
@@ -928,7 +755,7 @@ verify_dns() {
 
 rollback_dns() {
     echo
-    red_msg "Rolling back to the previous DNS configuration..."
+    red_msg "Rolling back to previous DNS configuration..."
     local item name dev o4 i4 o6 i6
 
     if [ "${#NM_CHANGES[@]}" -gt 0 ]; then
@@ -937,69 +764,31 @@ rollback_dns() {
             nmcli connection modify "$name" ipv4.dns "$o4" ipv4.ignore-auto-dns "${i4:-no}" >/dev/null 2>&1 || true
             nmcli connection modify "$name" ipv6.dns "$o6" ipv6.ignore-auto-dns "${i6:-no}" >/dev/null 2>&1 || true
             nmcli device reapply "$dev" >/dev/null 2>&1 || true
-            green_msg "NetworkManager profile restored: $name"
         done
     fi
 
-    if [ "$DNS_HOOK_CREATED" = "1" ]; then
-        rm -f "$NETWORKD_DISPATCHER_HOOK"
-        green_msg "networkd-dispatcher hook removed."
-    fi
-    if [ "$DNS_STATE_WRITTEN" = "1" ]; then
-        rm -f "$DNS_STATE_FILE"
-        green_msg "Persisted DNS state removed."
-    fi
-    if [ "$NETPLAN_FILE_CREATED" = "1" ] || [ "$NETPLAN_APPLIED" = "1" ]; then
-        if [ -f "${NETPLAN_DNS_FILE}.bak.$TS" ]; then
-            mv "${NETPLAN_DNS_FILE}.bak.$TS" "$NETPLAN_DNS_FILE"
-        else
-            rm -f "$NETPLAN_DNS_FILE"
-        fi
-        if [ "$NETPLAN_APPLIED" = "1" ]; then
-            netplan apply >/dev/null 2>&1 || true
-        fi
-        green_msg "Netplan DNS override removed."
-    fi
-
+    [ "$DNS_HOOK_CREATED" = "1" ] && rm -f "$NETWORKD_DISPATCHER_HOOK"
+    [ "$DNS_STATE_WRITTEN" = "1" ] && rm -f "$DNS_STATE_FILE"
+    
     if [ "$RESOLVED_DROPIN_WRITTEN" = "1" ]; then
-        if [ "$RESOLVED_DROPIN_EXISTED" = "1" ] && [ -f "${RESOLVED_DROPIN}.bak.$TS" ]; then
-            cp "${RESOLVED_DROPIN}.bak.$TS" "$RESOLVED_DROPIN"
-        else
-            rm -f "$RESOLVED_DROPIN"
-        fi
-        green_msg "systemd-resolved drop-in restored."
-    fi
-
-    if [ "$RESOLVED_MAIN_CLEANED" = "1" ] && [ -f "/etc/systemd/resolved.conf.bak.$TS" ]; then
-        cp "/etc/systemd/resolved.conf.bak.$TS" /etc/systemd/resolved.conf
-        green_msg "/etc/systemd/resolved.conf restored."
+        rm -f "$RESOLVED_DROPIN"
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        systemctl restart systemd-resolved >/dev/null 2>&1 || true
     fi
 
     if [ "$RESOLV_MODIFIED" = "1" ]; then
         restore_resolvconf
-        green_msg "/etc/resolv.conf restored to its exact previous state."
     fi
 
-    if [ "$RESOLVED_DROPIN_WRITTEN" = "1" ] || [ "$RESOLVED_MAIN_CLEANED" = "1" ]; then
-        systemctl daemon-reload >/dev/null 2>&1 || true
-        systemctl restart systemd-resolved >/dev/null 2>&1 || true
-    fi
     resolvectl flush-caches >/dev/null 2>&1 || true
-
-    sleep 1
-    if dns_query_ok github.com || dns_query_ok google.com; then
-        green_msg "Rollback complete: previous DNS is working again."
-    else
-        red_msg "Rollback applied but DNS still fails. Inspect /etc/resolv.conf and *.bak.$TS files."
-    fi
+    green_msg "Rollback completed."
 }
 
 has_ipv6() {
-    command -v ip >/dev/null 2>&1 || return 0
+    command -v ip >/dev/null 2>&1 || return 1
     ip -6 route show default 2>/dev/null | grep -q '^default'
 }
 
-# ---- MAIN DNS FLOW --------------------------------------------------------
 fix_dns() {
     echo
     yellow_msg "DNS Configuration."
@@ -1008,9 +797,8 @@ fix_dns() {
     choose_dns || { echo; return 1; }
     parse_dns_choice || { echo; return 1; }
 
-    # Skip IPv6 DNS servers when the server has no IPv6 connectivity
     if [ -n "$DNS_V6" ] && ! has_ipv6; then
-        yellow_msg "No IPv6 connectivity detected - IPv6 DNS servers skipped (IPv4-only mode)."
+        yellow_msg "No IPv6 connectivity detected - IPv6 DNS servers skipped."
         DNS_V6=""
     fi
 
@@ -1036,16 +824,16 @@ fix_dns() {
     fi
 
     if verify_dns; then
-        sleep 0.5
         return 0
     fi
 
     rollback_dns
     return 1
 }
+
 # ===================== END OF DNS SECTION =====================
 
-# Set the server TimeZone to the VPS IP address location.
+# Set Timezone
 set_timezone() {
     echo
     yellow_msg 'Setting TimeZone based on VPS IP address...'
@@ -1053,104 +841,107 @@ set_timezone() {
 
     local ip tz src
     ip=""
-    for src in "https://ipv4.icanhazip.com" "https://api.ipify.org" "https://ipv4.ident.me/"; do
-        ip=$(curl -s --max-time 10 "$src")
-        [ -n "$ip" ] && break
+    for src in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ipv4.ident.me/"; do
+        ip=$(curl -s --max-time 6 "$src" 2>/dev/null | tr -d '[:space:]')
+        if valid_ipv4 "$ip"; then
+            break
+        else
+            ip=""
+        fi
     done
-    [ -z "$ip" ] && { red_msg "Could not detect public IP. Setting timezone to UTC."; timedatectl set-timezone "UTC"; echo; return 1; }
 
-    tz=$(curl -s --max-time 10 "http://ip-api.com/json/$ip" | jq -r '.timezone // empty' 2>/dev/null)
+    if [ -z "$ip" ]; then
+        red_msg "Could not detect public IP. Setting timezone to UTC."
+        timedatectl set-timezone "UTC" 2>/dev/null || true
+        return 0
+    fi
 
-    # Only apply if the timezone actually exists on this system
+    tz=$(curl -s --max-time 6 "http://ip-api.com/json/$ip" 2>/dev/null | jq -r '.timezone // empty' 2>/dev/null | tr -d '[:space:]')
+
     if [ -n "$tz" ] && timedatectl list-timezones 2>/dev/null | grep -Fxq "$tz"; then
-        timedatectl set-timezone "$tz" && green_msg "Timezone set to $tz"
+        timedatectl set-timezone "$tz" 2>/dev/null && green_msg "Timezone set to $tz"
     else
-        red_msg "Could not determine a valid timezone. Setting timezone to UTC."
-        timedatectl set-timezone "UTC"
+        yellow_msg "Could not determine exact timezone location. Defaulting to UTC."
+        timedatectl set-timezone "UTC" 2>/dev/null || true
     fi
     echo
     sleep 0.5
 }
 
-
-# OS Detection
-if [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "Ubuntu" ]]; then
-    OS="ubuntu"
-    echo 
-    sleep 0.5
-    yellow_msg "OS: Ubuntu"
-    echo 
-    sleep 0.5
-elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "Debian GNU/Linux" ]]; then
-    OS="debian"
-    echo 
-    sleep 0.5
-    yellow_msg "OS: Debian"
-    echo 
-    sleep 0.5
-elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "CentOS Stream" ]]; then
-    OS="centos"
-    echo 
-    sleep 0.5
-    yellow_msg "OS: Centos Stream"
-    echo 
-    sleep 0.5
-elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "AlmaLinux" ]]; then
-    OS="almalinux"
-    echo 
-    sleep 0.5
-    yellow_msg "OS: AlmaLinux"
-    echo 
-    sleep 0.5
-elif [[ $(grep -oP '(?<=^NAME=").*(?=")' /etc/os-release) == "Fedora Linux" ]]; then
-    OS="fedora"
-    echo 
-    sleep 0.5
-    yellow_msg "OS: Fedora"
-    echo 
-    sleep 0.5
-else
-    echo 
-    sleep 0.5
-    red_msg "Unknown OS, Create an issue here: https://github.com/KanekiDevPro/Linux-Optimizer"
+# Standard OS Detection
+detect_os() {
     OS="unknown"
-    echo 
-    sleep 2
-fi
+    if [ -f /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        case "$ID" in
+            ubuntu) OS="ubuntu" ;;
+            debian) OS="debian" ;;
+            centos) OS="centos" ;;
+            almalinux|rocky|rhel|ol) OS="almalinux" ;;
+            fedora) OS="fedora" ;;
+            *)
+                case "$ID_LIKE" in
+                    *debian*|*ubuntu*) OS="debian" ;;
+                    *rhel*|*fedora*|*centos*) OS="centos" ;;
+                    *) OS="unknown" ;;
+                esac
+                ;;
+        esac
+    fi
 
-if [ "$OS" = "unknown" ]; then
-    echo
-    red_msg "Unsupported OS. Nothing has been changed. Exiting."
-    echo
-    exit 1
-fi
+    case "$OS" in
+        ubuntu)    yellow_msg "Detected OS: Ubuntu ($VERSION_ID)" ;;
+        debian)    yellow_msg "Detected OS: Debian ($VERSION_ID)" ;;
+        centos)    yellow_msg "Detected OS: CentOS ($VERSION_ID)" ;;
+        almalinux) yellow_msg "Detected OS: AlmaLinux/RHEL-compatible ($VERSION_ID)" ;;
+        fedora)    yellow_msg "Detected OS: Fedora ($VERSION_ID)" ;;
+        *)
+            red_msg "Unsupported or unknown OS."
+            exit 1
+            ;;
+    esac
+}
 
-## Run
+detect_os
+sleep 0.5
 
-# Install dependencies
+# Install dependencies based on OS
 if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
     install_dependencies_debian_based
 elif [[ "$OS" == "centos" || "$OS" == "fedora" || "$OS" == "almalinux" ]]; then
     install_dependencies_rhel_based
 fi
 
-
-# Fix Hosts file
 fix_etc_hosts
 sleep 0.5
 
-# Fix DNS
 fix_dns
 sleep 0.5
 
-# Timezone
 set_timezone
 sleep 0.5
 
-
-# Run Script based on Distros
+# Run Optimizer Script
 run_distro_optimizer() {
-    local url file
+    local file=""
+    
+    # Check if a local optimizer script is already present in current directory
+    if [ -f "optimizer.sh" ]; then
+        file="optimizer.sh"
+    elif [ -f "${OS}-optimizer.sh" ]; then
+        file="${OS}-optimizer.sh"
+    fi
+
+    if [ -n "$file" ] && [ -s "$file" ]; then
+        green_msg "Found local optimizer script ($file). Executing..."
+        chmod +x "$file"
+        bash "$file"
+        return 0
+    fi
+
+    # Fallback to download if local file not found
+    local url=""
     case "$OS" in
         ubuntu)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/ubuntu-optimizer.sh"; file="ubuntu-optimizer.sh" ;;
         debian)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/debian-optimizer.sh"; file="debian-optimizer.sh" ;;
@@ -1159,26 +950,15 @@ run_distro_optimizer() {
         fedora)    url="https://raw.githubusercontent.com/KanekiDevPro/Linux-Optimizer/main/scripts/fedora-optimizer.sh"; file="fedora-optimizer.sh" ;;
     esac
 
-    if ! wget "$url" -q -O "$file"; then
+    yellow_msg "Downloading optimizer script from GitHub..."
+    if ! curl -fsSL "$url" -o "$file" 2>/dev/null && ! wget -q "$url" -O "$file" 2>/dev/null; then
         red_msg "Download failed: $url"
-        red_msg "Check network/DNS, then re-run the script."
+        red_msg "Please put your optimizer.sh script alongside this launcher and re-run."
         exit 1
     fi
+
     chmod +x "$file"
-
-    if ! bash -n "$file" 2>/dev/null; then
-        red_msg "Downloaded script failed the syntax check. Aborting for safety."
-        exit 1
-    fi
-
-    # Pre-create the sshd privilege-separation runtime dir so `sshd -t` inside
-    # the distro optimizer does not fail with the false positive:
-    # "Missing privilege separation directory: /run/sshd"
     mkdir -p /run/sshd && chmod 0755 /run/sshd
-    if [ ! -f /usr/lib/tmpfiles.d/sshd.conf ]; then
-        echo 'd /run/sshd 0755 root root -' > /usr/lib/tmpfiles.d/sshd.conf
-    fi
-
     bash "$file"
 }
 
